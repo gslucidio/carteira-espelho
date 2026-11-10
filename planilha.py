@@ -199,7 +199,7 @@ def montar(d, destino):
            "Uma linha por lançamento do extrato. Saldo = saldo anterior + entrada − saída. "
            "Classifique os lançamentos amarelos pela lista da coluna J: a escolha é mantida nas próximas gerações.")
     cabecalho(ws_caixa, 4, ["ID", "Data", "Histórico", "Contraparte", "Entrada (+)", "Saída (−)", "Saldo calculado",
-                            "Saldo do banco", "Diferença", "Classificação", "Referência", "Tipo de despesa"])
+                            "Saldo do banco", "Diferença", "Classificação", "Referência", "Tipo de despesa", "Classe de cota"])
     c0 = 5
     for i, m in enumerate(cx):
         r = c0 + i
@@ -213,8 +213,14 @@ def montar(d, destino):
             editavel=m["classificacao"] == "A classificar")
         cel(ws_caixa, r, 11, m["referencia"], estilo=AZUL)
         cel(ws_caixa, r, 12, m.get("tipo") or None, estilo=AZUL)
+        precisa = bool(d.get("nomes_classes")) and m["classificacao"] in ("Aporte de cotista", "Resgate de cotista")
+        cel(ws_caixa, r, 13, m.get("classe_cota") or None, estilo=AZUL, editavel=precisa and not m.get("classe_cota"))
     c1 = c0 + max(len(cx), 1) - 1
-    linha_total(ws_caixa, c1 + 1, 12, [5, 6, 9], c0, c1)
+    linha_total(ws_caixa, c1 + 1, 13, [5, 6, 9], c0, c1)
+    if d.get("nomes_classes"):
+        dvk = DataValidation(type="list", formula1='"' + ",".join(d["nomes_classes"]) + '"', allow_blank=True)
+        ws_caixa.add_data_validation(dvk)
+        dvk.add(f"M{c0}:M{c1 + 500}")
     dvc = DataValidation(type="list", formula1='"' + ",".join(CLASSES_CAIXA) + '"')
     ws_caixa.add_data_validation(dvc)
     dvc.add(f"J{c0}:J{c1 + 500}")
@@ -230,7 +236,7 @@ def montar(d, destino):
         cel(ws_caixa, r, 2, f'=SUMIFS({CE},{CJ},A{r},{CB},"<="&DataBase)', MOEDA)
         cel(ws_caixa, r, 3, f'=SUMIFS({CF},{CJ},A{r},{CB},"<="&DataBase)', MOEDA)
         cel(ws_caixa, r, 4, f"=B{r}-C{r}", MOEDA)
-    larguras(ws_caixa, [10, 12, 34, 42, 14, 14, 14, 14, 11, 22, 46, 24])
+    larguras(ws_caixa, [10, 12, 34, 42, 14, 14, 14, 14, 11, 22, 46, 24, 16])
     ws_caixa.freeze_panes = "C5"
 
     def CLS(classe, col):
@@ -271,7 +277,8 @@ def montar(d, destino):
     R_CLS, R_PLC = (13, 14) if classes else (None, 12)
     r_cotas = R_PLC + 2
     r_cota = r_cotas + 1
-    rt = r_cota + 2                             # título da tabela de fundos
+    rk = r_cota + 2                             # bloco "patrimônio por classe" (só com várias classes)
+    rt = rk + (len(classes) + 5 if classes else 0)   # título da tabela de fundos
     rf0 = rt + 2
     rf1 = rf0 + max(len(fundos), 1) - 1
     TIPO_F, VAL_F = f"$B${rf0}:$B${rf1}", f"$E${rf0}:$E${rf1}"
@@ -300,6 +307,31 @@ def montar(d, destino):
     cel(w, r_cotas, 2, d["quantidade_cotas"], COTA, AZUL, editavel=True, borda=False)
     w.cell(r_cota, 1, "Valor da cota" + (" da subordinada" if classes else ""))
     cel(w, r_cota, 2, f"=B{R_PLC}/B{r_cotas}", COTA, NEG, borda=False)
+    if classes:
+        CM, CJ_, CE_, CF_, CB_ = (f"Caixa!${l}${c0}:${l}${c1 + 500}" for l in "MJEFB")
+        w.cell(rk, 1, "Patrimônio por classe de cota").font = NEG
+        cabecalho(w, rk + 1, ["Classe", "Cotas", "Valor da cota", "PL", "% do patrimônio", "Aportes (extrato)",
+                              "Resgates (extrato)", "Resultado da classe", "Resultado / capital"])
+        linhas_k = [(d["nomes_classes"][0], f"=B{r_cotas}", f"=B{r_cota}", f"=B{R_PLC}")]
+        for i, cl in enumerate(classes, 5):
+            linhas_k.append((cl["nome"], f"=Passivo!C{i}", f"=Passivo!D{i}", f"=Passivo!E{i}"))
+        for i, (nome_k, fc, fq, fp) in enumerate(linhas_k, rk + 2):
+            cel(w, i, 1, nome_k, estilo=AZUL)
+            cel(w, i, 2, fc, "#,##0.0000")
+            cel(w, i, 3, fq, "#,##0.000000")
+            cel(w, i, 4, fp, MOEDA)
+            cel(w, i, 5, f"=D{i}/$B${R_PLT}", PCT)
+            cel(w, i, 6, f'=SUMIFS({CE_},{CJ_},"Aporte de cotista",{CM},A{i},{CB_},"<="&DataBase)', MOEDA)
+            cel(w, i, 7, f'=SUMIFS({CF_},{CJ_},"Resgate de cotista",{CM},A{i},{CB_},"<="&DataBase)', MOEDA)
+            cel(w, i, 8, f'=IF(F{i}-G{i}=0,"",D{i}-(F{i}-G{i}))', MOEDA)
+            cel(w, i, 9, f'=IF(F{i}-G{i}=0,"",H{i}/(F{i}-G{i}))', PCT)
+        kt = rk + 2 + len(linhas_k)
+        for col, v, fm in ((1, "Total", None), (4, f"=SUM(D{rk + 2}:D{kt - 1})", MOEDA), (5, f"=SUM(E{rk + 2}:E{kt - 1})", PCT),
+                           (6, f"=SUM(F{rk + 2}:F{kt - 1})", MOEDA), (7, f"=SUM(G{rk + 2}:G{kt - 1})", MOEDA)):
+            c = cel(w, kt, col, v, fm, NEG)
+        for col in range(1, 10):
+            w.cell(kt, col).fill = F_TOT
+        w.cell(kt + 1, 1, "Aportes e resgates por classe vêm da coluna 'Classe de cota' da aba Caixa.").font = CINZA
     w.cell(rt, 1, "Cotas de fundos (quantidade × cota)").font = NEG
     cabecalho(w, rt + 1, ["Fundo", "Tipo", "Quantidade de cotas", "Valor da cota", "Valor"])
     for i, f_ in enumerate(fundos or [dict(descricao="", tipo="Liquidez", quantidade=0, valor_cota=0)]):
@@ -335,7 +367,7 @@ def montar(d, destino):
         cel(w, i, 2, f, MOEDA, est, borda=False)
     w.cell(p + 5, 1, "Resultado acumulado em % do capital")
     cel(w, p + 5, 2, f"=IF(B{p + 3}=0,0,B{p + 4}/B{p + 3})", PCT, borda=False)
-    larguras(w, [52, 20, 18, 16, 16])
+    larguras(w, [52, 20, 18, 16, 16, 16, 16, 16, 14])
 
     r_resultado = p + 4
 

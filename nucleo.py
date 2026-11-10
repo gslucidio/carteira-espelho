@@ -24,6 +24,7 @@ class ErroEntrada(Exception):
 
 OCORRENCIA_ENTRADA = {"01"}
 ALIQUOTA_IOF = 0.0038   # IOF sobre aportes em FIDC
+NOME_SUBORDINADA = "Subordinada"
 
 # Regras fixas de classificação do caixa, válidas para todos os fundos.
 # (trecho do nome da contraparte, classificação se ENTRADA, classificação se SAÍDA, referência)
@@ -132,7 +133,9 @@ def montar_classes(adm, carteiras_classes, alertas):
                   pl=arq["pl"] if arq else None, cotas=arq["quantidade_cotas"] if arq else -sum(p["quantidade"] for p in pos_p),
                   cota=arq["valor_cota"] if arq else None, aplicado=sum(p["valor_aplicado"] for p in (pos_c or pos_p)) * (1 if pos_c else -1),
                   rentabilidades=arq["rentabilidades"] if arq else {}, arquivo=arq["arquivo"] if arq else None,
-                  divergencias=[])
+                  divergencias=[],
+                  aplicacoes=[(q["data"], q["valor_aplicado"]) for q in pos_c] if pos_c else
+                             [(q["data"], -q["valor_aplicado"]) for q in pos_p])
         if not arq:
             alertas.append(f"Classe {nome}: a carteira principal registra {brl(passivo_principal)} de passivo, mas a carteira "
                            "da classe não foi enviada. Usado o valor da carteira principal.")
@@ -224,7 +227,7 @@ def _data(v):
 
 
 def memoria_vazia():
-    return dict(arquivo=None, despesas={}, caixa={}, contrapartes={}, lotes={}, painel={})
+    return dict(arquivo=None, despesas={}, caixa={}, classe_cota={}, contrapartes={}, lotes={}, painel={})
 
 
 def ultima_planilha(pasta_saida):
@@ -267,6 +270,8 @@ def ler_memoria(fonte):
         id_, contraparte, entrada, cls, ref = str(r[0]), r[3], r[4], r[9], r[10]
         if ref and str(ref).startswith("Sugestão:"):
             ref = ""
+        if len(r) > 12 and r[12]:
+            mem["classe_cota"][id_] = str(r[12])
         if cls and cls != "A classificar":
             mem["caixa"][id_] = (cls, ref or "")
             votos[(str(contraparte or "").upper(), bool(entrada))][cls] += 1
@@ -466,6 +471,28 @@ def processar(cnabs, carteiras_adm, estoques_adm, extratos, planilha_anterior=No
             if v and abs(v[0] - m["entrada"]) < 0.01:
                 ref = f"Baixas de {m['data']:%d/%m} ({v[1]} títulos)"
         m["classificacao"], m["referencia"] = cls, ref
+    # classe de cota de cada aporte/resgate (fundos com várias classes)
+    nomes_classes = ([NOME_SUBORDINADA] + [cl["nome"] for cl in classes]) if classes else []
+    for m in caixa:
+        m["classe_cota"] = mem["classe_cota"].get(m["id"], "")
+        if classes and not m["classe_cota"] and m["entrada"] and m["classificacao"] in ("Aporte de cotista", "A classificar"):
+            # aporte que bate com uma aplicação registrada pela ADM numa classe (valor cheio ou líquido de IOF)
+            for cl in classes:
+                if any(abs((d_ - m["data"]).days) <= 5 and (abs(v - m["entrada"]) < 0.01 or
+                       abs(v - round(m["entrada"] * (1 - ALIQUOTA_IOF), 2)) < 0.02) for d_, v in cl["aplicacoes"]):
+                    if m["classificacao"] == "A classificar":
+                        a_classificar -= 1
+                        m["classificacao"] = "Aporte de cotista"
+                    m["classe_cota"] = cl["nome"]
+                    if not m["referencia"] or m["referencia"].startswith("Sugestão"):
+                        m["referencia"] = f"Aplicação registrada pela ADM na classe {cl['nome']}"
+                    break
+    sem_classe = [m for m in caixa if classes and m["classificacao"] in ("Aporte de cotista", "Resgate de cotista")
+                  and not m["classe_cota"]]
+    if sem_classe:
+        alertas.append(f"{len(sem_classe)} aporte(s)/resgate(s) de cotista sem a classe de cota indicada. Escolha a classe "
+                       "na coluna 'Classe de cota' do Caixa.")
+
     # IOF de 0,38% sobre aportes: pagamentos à administradora que batem com 0,38% de uma entrada recente
     entradas = [m for m in caixa if m["entrada"] and m["classificacao"] not in
                 ("Resgate do fundo DI", "Recebimento de DC", "Resgate/amortização de cotas de FIDC")]
@@ -519,7 +546,7 @@ def processar(cnabs, carteiras_adm, estoques_adm, extratos, planilha_anterior=No
         titulos=titulos, lotes=list(lotes.values()),
         estoque_adm=estoque_adm, estoque_adm_arquivo=est_arq, estoque_adm_data=est_data,
         caixa=caixa, despesas=despesas, fundos=adm["fundos"], quantidade_cotas=adm["quantidade_cotas"],
-        classes=classes,
+        classes=classes, nomes_classes=nomes_classes,
         adm=adm, carteira_adm_arquivo=adm["arquivo"],
         sacados=sorted({t["sacado"] for t in titulos}),
         vencimentos=sorted({t["vencimento"] for t in titulos if t["vencimento"]}),

@@ -250,6 +250,22 @@ def calcular(d):
                                  cdi_mes=r_.get("(%) CDI", {}).get("Mês"), dia=r_.get("Carteira", {}).get("Dia"),
                                  cdi_dia=r_.get("(%) CDI", {}).get("Dia")))
         passivo = pd.DataFrame(linhas_p)
+        # aportes e resgates de cada classe, pelo extrato (coluna "Classe de cota" do Caixa)
+        nome_cx = {"Subordinada (carteira principal)": d["nomes_classes"][0] if d.get("nomes_classes") else "Subordinada"}
+        ap, rg = defaultdict(float), defaultdict(float)
+        if len(cx):
+            f_ = cx[cx["data"] <= db]
+            for _, m in f_[f_["classificacao"] == "Aporte de cotista"].iterrows():
+                ap[m.get("classe_cota") or ""] += m["entrada"] - m["saida"]
+            for _, m in f_[f_["classificacao"] == "Resgate de cotista"].iterrows():
+                rg[m.get("classe_cota") or ""] += m["saida"] - m["entrada"]
+        chave_cx = passivo["classe"].map(lambda x: nome_cx.get(x, x))
+        passivo["aportes"] = chave_cx.map(lambda x: ap.get(x, 0.0))
+        passivo["resgates"] = chave_cx.map(lambda x: rg.get(x, 0.0))
+        passivo["capital"] = passivo["aportes"] - passivo["resgates"]
+        passivo["resultado"] = [p_ - k if k else None for p_, k in zip(passivo["pl_gestora"], passivo["capital"])]
+        passivo["resultado_pct"] = [r_ / k if k and r_ is not None else None for r_, k in zip(passivo["resultado"], passivo["capital"])]
+        aportes_sem_classe = ap.get("", 0.0) + rg.get("", 0.0)
         passivo["pct_pl"] = passivo["pl_gestora"] / pl_total if pl_total else 0.0
         passivo["dif_principal"] = passivo["passivo_principal"] - passivo["pl_adm"]
         # aderência ao benchmark no último dia: CDI implícito = rent. do dia ÷ %CDI do dia
@@ -274,6 +290,6 @@ def calcular(d):
         passivo["subordinacao_abaixo"] = passivo["classe"].map(subord)
         passivo["ordem"] = passivo["classe"].map({n_: i for i, n_ in enumerate(ordem)})
 
-    return dict(dre=dre, passivo=passivo, fluxo_mensal=fluxo, titulos=tit, em_carteira=ab, caixa=cx, por_classe=por_classe, gestora=gestora, adm=adm,
+    return dict(dre=dre, passivo=passivo, aportes_sem_classe=aportes_sem_classe if classes else 0.0, fluxo_mensal=fluxo, titulos=tit, em_carteira=ab, caixa=cx, por_classe=por_classe, gestora=gestora, adm=adm,
                 comparacao=comparacao, estoque_adm=eadm, faltam_na_adm=faltam_na_adm,
                 conferencias=conferencias, painel=painel)

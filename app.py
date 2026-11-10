@@ -118,7 +118,10 @@ if st.session_state.get("assinatura") != assinatura:
 dados = copy.deepcopy(st.session_state["base"])
 for m in dados["caixa"]:
     if m["id"] in st.session_state["ed_caixa"]:
-        m["classificacao"], m["referencia"] = st.session_state["ed_caixa"][m["id"]]
+        ed_ = st.session_state["ed_caixa"][m["id"]]
+        m["classificacao"], m["referencia"] = ed_[0], ed_[1]
+        if len(ed_) > 2:
+            m["classe_cota"] = ed_[2]
 for x in dados["despesas"]:
     if x["descricao"] in st.session_state["ed_desp"]:
         x["valor_gestora"], x["observacao"] = st.session_state["ed_desp"][x["descricao"]]
@@ -130,6 +133,14 @@ nucleo.atribuir_tipos(dados)
 r = calculos.calcular(dados)
 G, A, P = r["gestora"], r["adm"], r["painel"]
 a_classificar = sum(1 for m in dados["caixa"] if m["classificacao"] == "A classificar")
+# alertas de pendências do caixa são recalculados com as correções feitas na tela
+_sem_cl = sum(1 for m in dados["caixa"] if dados.get("nomes_classes") and not m.get("classe_cota")
+              and m["classificacao"] in ("Aporte de cotista", "Resgate de cotista"))
+dados["alertas"] = [x for x in dados["alertas"] if "'A classificar'" not in x and "sem a classe de cota" not in x]
+if a_classificar:
+    dados["alertas"].append(f"{a_classificar} lançamento(s) de caixa 'A classificar' (tela Caixa e despesas).")
+if _sem_cl:
+    dados["alertas"].append(f"{_sem_cl} aporte(s)/resgate(s) de cotista sem a classe de cota indicada (tela Caixa e despesas).")
 conf = r["conferencias"]
 n_ok, n_conf = int((conf["OK"] == True).sum()), int(conf["OK"].notna().sum())  # noqa: E712
 
@@ -181,6 +192,21 @@ if menu == "🏠 Visão geral":
     tabela(r["comparacao"][["Linha", "Gestora", "Administradora", "Diferença", "Onde investigar"]],
            moeda=("Gestora", "Administradora", "Diferença"), destaque=("Diferença", lambda v: abs(v) >= 1))
     st.caption("Diferenças acima de R$ 1,00 merecem explicação. Centavos são arredondamento.")
+
+    if len(r["passivo"]):
+        st.subheader("Patrimônio por classe de cota")
+        pk = r["passivo"].sort_values("ordem")[["classe", "cotas", "cota_adm", "pl_gestora", "pct_pl", "aportes", "resgates",
+                                                "resultado", "resultado_pct"]].copy()
+        pk["cotas"] = pk["cotas"].apply(lambda v: num(v, 4))
+        pk["cota_adm"] = pk["cota_adm"].apply(lambda v: num(v, 6) if v else "-")
+        pk["resultado_pct"] = pk["resultado_pct"].apply(lambda v: pct(v) if v is not None and not pd.isna(v) else "-")
+        tabela(pk.rename(columns={"classe": "Classe", "cotas": "Cotas", "cota_adm": "Cota", "pl_gestora": "PL",
+                                  "pct_pl": "% do patrimônio", "aportes": "Aportes", "resgates": "Resgates",
+                                  "resultado": "Resultado", "resultado_pct": "Resultado / capital"}),
+               moeda=("PL", "Aportes", "Resgates", "Resultado"), pcts=("% do patrimônio",))
+        if abs(r["aportes_sem_classe"]) >= 0.01:
+            st.warning(f"{brl(r['aportes_sem_classe'])} em aportes/resgates de cotista sem classe indicada: "
+                       "o resultado por classe fica incompleto. Indique a classe em Caixa e despesas.")
 
     col_a, col_b = st.columns(2)
     with col_a:
@@ -435,33 +461,49 @@ elif menu == "📦 Estoque":
 # =====================================================================================
 elif menu == "💰 Caixa e despesas":
     st.subheader("Caixa")
+    sem_cl = sum(1 for m in dados["caixa"] if dados.get("nomes_classes") and not m.get("classe_cota")
+                 and m["classificacao"] in ("Aporte de cotista", "Resgate de cotista"))
+    if sem_cl:
+        st.warning(f"{sem_cl} aporte(s)/resgate(s) de cotista sem classe. Escolha na coluna **Classe de cota**.")
     if a_classificar:
         st.warning(f"{a_classificar} lançamento(s) a classificar. Escolha na coluna **Classificação**.")
     else:
         st.success("Todos os lançamentos estão classificados.")
-    so_pend = st.toggle("Mostrar só os lançamentos a classificar", value=bool(a_classificar))
+    so_pend = st.toggle("Mostrar só os lançamentos pendentes", value=bool(a_classificar or sem_cl))
     cx = pd.DataFrame(dados["caixa"])
     if len(cx):
-        vis = cx[cx["classificacao"] == "A classificar"] if so_pend else cx
+        tem_classes = bool(dados.get("nomes_classes"))
+        if tem_classes:
+            pend = (cx["classificacao"] == "A classificar") | (cx["classificacao"].isin(["Aporte de cotista", "Resgate de cotista"])
+                                                              & (cx["classe_cota"].fillna("") == ""))
+        else:
+            pend = cx["classificacao"] == "A classificar"
+        vis = cx[pend] if so_pend else cx
+        colunas = ["id", "data", "historico", "contraparte", "entrada", "saida", "classificacao", "referencia"] + \
+                  (["classe_cota"] if tem_classes else [])
         ed = st.data_editor(
-            vis[["id", "data", "historico", "contraparte", "entrada", "saida", "classificacao", "referencia"]],
+            vis[colunas],
             column_config={
                 "id": "ID", "data": st.column_config.DateColumn("Data", format="DD/MM/YYYY"),
                 "historico": "Histórico", "contraparte": "Contraparte",
                 "entrada": st.column_config.NumberColumn("Entrada", format="%.2f"),
                 "saida": st.column_config.NumberColumn("Saída", format="%.2f"),
                 "classificacao": st.column_config.SelectboxColumn("Classificação", options=CLASSES, required=True),
-                "referencia": st.column_config.TextColumn("Referência")},
+                "referencia": st.column_config.TextColumn("Referência"),
+                "classe_cota": st.column_config.SelectboxColumn("Classe de cota", options=[""] + list(dados.get("nomes_classes") or []),
+                                                                help="Para aportes e resgates de cotista")},
             disabled=["id", "data", "historico", "contraparte", "entrada", "saida"],
             hide_index=True, width="stretch", key=f"ed_cx_{so_pend}")
         mudou = False
         for _, row in ed.iterrows():
             orig = cx.loc[cx["id"] == row["id"]].iloc[0]
             ref = row["referencia"] or ""
-            if row["classificacao"] != orig["classificacao"] or ref != (orig["referencia"] or ""):
+            classe_ = (row["classe_cota"] or "") if tem_classes else (orig.get("classe_cota") or "")
+            if (row["classificacao"] != orig["classificacao"] or ref != (orig["referencia"] or "")
+                    or classe_ != (orig.get("classe_cota") or "")):
                 if row["classificacao"] != "A classificar" and ref.startswith("Sugestão:"):
                     ref = ""
-                st.session_state["ed_caixa"][row["id"]] = (row["classificacao"], ref)
+                st.session_state["ed_caixa"][row["id"]] = (row["classificacao"], ref, classe_)
                 mudou = True
         if mudou:
             st.rerun()
@@ -545,8 +587,9 @@ para recuperar as classificações do caixa, as despesas ajustadas e os parâmet
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
     st.markdown("**Correções feitas nesta sessão**")
     if st.session_state["ed_caixa"] or st.session_state["ed_desp"] or st.session_state["ed_painel"]:
-        for i, (c, ref) in st.session_state["ed_caixa"].items():
-            st.markdown(f"- Caixa, lançamento {i}: {c}" + (f" ({ref})" if ref else ""))
+        for i, ed_ in st.session_state["ed_caixa"].items():
+            st.markdown(f"- Caixa, lançamento {i}: {ed_[0]}" + (f" · classe {ed_[2]}" if len(ed_) > 2 and ed_[2] else "")
+                        + (f" ({ed_[1]})" if ed_[1] else ""))
         for d_, (v, o) in st.session_state["ed_desp"].items():
             st.markdown(f"- Despesa {d_}: gestora {brl(v)}" + (f" — {o}" if o else ""))
         if st.session_state["ed_painel"]:
