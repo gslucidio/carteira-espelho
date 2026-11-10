@@ -1,0 +1,13 @@
+# Nunca versionar dados dos fundos
+*.xlsx
+*.xls
+*.csv
+*.CSV
+*.REM
+*.rem
+*.TXT
+*.RET
+entradas/
+saida/
+__pycache__/
+.venv/
