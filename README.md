@@ -8,11 +8,12 @@ concilia o caixa pelo extrato e gera a planilha completa (com fórmulas) para au
 
 1. Abra o app e envie os arquivos pela barra lateral, cada um na sua categoria:
    1. **CNABs** — remessas e baixas (.REM), desde o início do fundo
-   2. **Carteira diária da ADM** (.xlsx) — obrigatório; define a data-base
+   2. **Carteira diária da ADM** (.xlsx) — obrigatório; define a data-base. Em fundos com várias classes,
+      envie a carteira principal (subordinada) e a de cada mezanino/sênior, da mesma data
    3. **Estoque analítico da ADM** (.csv)
    4. **Extrato da conta** (.csv)
    5. **Última planilha baixada** (opcional) — traz as correções do uso anterior
-2. Navegue pelas telas: Visão geral, Estoque, Caixa e despesas, Conferências.
+2. Navegue pelas telas: Visão geral, DRE, Passivo e cotas, Estoque, Caixa e despesas, Conferências.
 3. Classifique os lançamentos de caixa em amarelo e corrija despesas, se discordar da ADM.
 4. **Baixe a planilha ao terminar.** Ela é a memória da próxima sessão.
 
@@ -49,6 +50,14 @@ Também dá para gerar a planilha sem o dashboard, lendo pastas locais
 
 Regras fixas de classificação do caixa (ID RF, VIZ, ID Corretora, Zielo) ficam em `REGRAS_CAIXA`,
 no início de `nucleo.py`. Para incluir outra contraparte, acrescente uma linha.
+
+## Fundos com várias classes de cotas
+
+A carteira principal da ADM traz os ativos e registra as demais classes como passivo (posições negativas).
+O app junta cada classe com a sua própria carteira e mostra: PL e cota por classe, participação no patrimônio,
+rentabilidade contra o benchmark (CDI + spread, verificado com o CDI implícito na própria carteira),
+índices de subordinação e divergências aplicação a aplicação entre as duas visões.
+A ordem de prioridade é assumida pelo spread (maior spread = mais júnior); confirme com o regulamento.
 
 ## Limitações
 

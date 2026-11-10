@@ -36,6 +36,116 @@ REGRAS_CAIXA = [
 ]
 
 
+TIPOS_DESPESA = ["Taxa de gestão", "Administração e custódia", "Plataforma e serviços", "Auditoria",
+                 "Tarifas bancárias", "Outras despesas"]
+
+
+def tipo_despesa(texto, classificacao=None):
+    """Tipo de despesa para o DRE, a partir da descrição/contraparte/referência."""
+    t = (texto or "").upper()
+    if classificacao == "Tarifa bancária" or "TARIFA" in t:
+        return "Tarifas bancárias"
+    if "GEST" in t or re.search(r"(?<![A-Z])VIZ(?![A-Z])", t):
+        return "Taxa de gestão"
+    if any(x in t for x in ("ADM", "CUST", "ID CORRETORA", "ID CTVM")):
+        return "Administração e custódia"
+    if "AUDIT" in t:
+        return "Auditoria"
+    if any(x in t for x in ("ZIELO", "PLATAFORMA", "REGISTR", "CERC", "CARTÓRIO", "CARTORIO", "ASSINATURA")):
+        return "Plataforma e serviços"
+    return "Outras despesas"
+
+
+def atribuir_tipos(dados):
+    """Preenche o tipo de despesa nos lançamentos de caixa e nas despesas a pagar."""
+    for m in dados["caixa"]:
+        if m["classificacao"] in ("Taxas e despesas", "Tarifa bancária"):
+            m["tipo"] = tipo_despesa(f"{m.get('referencia') or ''} {m['contraparte']} {m['historico']}", m["classificacao"])
+        else:
+            m["tipo"] = ""
+    for x in dados["despesas"]:
+        x["tipo"] = tipo_despesa(x["descricao"])
+    return dados
+
+
+def _nome_classe(nome_carteira, nome_fundo_principal, grupo):
+    """'FIDC NX CAPITAL NP RL - MEZ II' -> 'MEZ II'; sem arquivo, usa o grupo da carteira principal."""
+    if nome_carteira and nome_fundo_principal and nome_carteira.startswith(nome_fundo_principal):
+        resto = nome_carteira[len(nome_fundo_principal):].strip(" -")
+        if resto:
+            return resto
+    return (grupo or "Classe").replace("Cota ", "").replace(" Pós", "").strip()
+
+
+def _spread(indice):
+    """'10,00 CDI' -> 0.10 (CDI + 10% a.a.)."""
+    m = re.match(r"\s*([\d.,]+)\s*CDI", indice or "")
+    return float(m.group(1).replace(",", ".")) / 100 if m else None
+
+
+def montar_classes(adm, carteiras_classes, alertas):
+    """
+    Junta o passivo de cada classe registrado na carteira principal com a carteira da própria classe.
+    Devolve uma lista vazia em fundos de classe única.
+    """
+    data = adm["data_posicao"]
+    por_codigo = {}
+    for c in carteiras_classes:
+        if c["data_posicao"] != data or not c.get("codigo"):
+            continue
+        if c["codigo"] in por_codigo:
+            alertas.append(f"Duas carteiras da mesma classe ({c['codigo']}) na mesma data; usada a primeira.")
+            continue
+        por_codigo[c["codigo"]] = c
+    passivo = defaultdict(list)
+    for p in adm.get("posicoes_classes", []):
+        passivo[p["titulo"]].append(p)
+    classes = []
+    for codigo in sorted(set(passivo) | set(por_codigo)):
+        arq = por_codigo.get(codigo)
+        pos_p = passivo.get(codigo, [])
+        pos_c = arq["posicoes_classes"] if arq else []
+        grupo = (pos_p or pos_c or [{}])[0].get("grupo")
+        indice = (pos_c or pos_p or [{}])[0].get("indice", "")
+        nome = _nome_classe(arq["nome_fundo"] if arq else None, adm.get("nome_fundo"), grupo)
+        passivo_principal = -sum(p["valor"] for p in pos_p)
+        cl = dict(codigo=codigo, nome=nome, indice=indice, spread=_spread(indice),
+                  passivo_principal=passivo_principal,
+                  pl=arq["pl"] if arq else None, cotas=arq["quantidade_cotas"] if arq else -sum(p["quantidade"] for p in pos_p),
+                  cota=arq["valor_cota"] if arq else None, aplicado=sum(p["valor_aplicado"] for p in (pos_c or pos_p)) * (1 if pos_c else -1),
+                  rentabilidades=arq["rentabilidades"] if arq else {}, arquivo=arq["arquivo"] if arq else None,
+                  divergencias=[])
+        if not arq:
+            alertas.append(f"Classe {nome}: a carteira principal registra {brl(passivo_principal)} de passivo, mas a carteira "
+                           "da classe não foi enviada. Usado o valor da carteira principal.")
+        elif not pos_p:
+            alertas.append(f"Classe {nome}: há carteira da classe, mas a carteira principal não registra o passivo dela.")
+        else:
+            if abs(cl["pl"] - passivo_principal) >= 1:
+                alertas.append(f"Classe {nome}: a carteira principal registra {brl(passivo_principal)} de passivo, mas a "
+                               f"carteira da classe tem PL de {brl(cl['pl'])} (diferença de {brl(passivo_principal - cl['pl'])}).")
+            # compara aplicação a aplicação (pela ordem e pela data/valor aplicado)
+            restantes = list(pos_c)
+            for p in pos_p:
+                par = next((q for q in restantes if q["data"] == p["data"] and abs(q["valor_aplicado"] + p["valor_aplicado"]) < 0.01), None)
+                if par is None:
+                    cl["divergencias"].append(dict(data=p["data"], valor_aplicado=-p["valor_aplicado"], cotas_principal=-p["quantidade"],
+                                                   cotas_classe=None, valor_principal=-p["valor"], valor_classe=None))
+                    continue
+                restantes.remove(par)
+                if abs(par["quantidade"] + p["quantidade"]) > 1e-6 or abs(par["valor"] + p["valor"]) >= 0.01:
+                    cl["divergencias"].append(dict(data=p["data"], valor_aplicado=par["valor_aplicado"], cotas_principal=-p["quantidade"],
+                                                   cotas_classe=par["quantidade"], valor_principal=-p["valor"], valor_classe=par["valor"]))
+            for q in restantes:
+                cl["divergencias"].append(dict(data=q["data"], valor_aplicado=q["valor_aplicado"], cotas_principal=None,
+                                               cotas_classe=q["quantidade"], valor_principal=None, valor_classe=q["valor"]))
+            if cl["divergencias"]:
+                alertas.append(f"Classe {nome}: {len(cl['divergencias'])} aplicação(ões) com quantidade de cotas ou valor diferente "
+                               "entre a carteira principal e a carteira da classe (detalhe na tela Passivo e cotas).")
+        classes.append(cl)
+    return classes
+
+
 def regra_fixa(contraparte, entrada):
     nome = (contraparte or "").upper()
     for trecho, cls_ent, cls_sai, ref in REGRAS_CAIXA:
@@ -173,8 +283,17 @@ def processar(cnabs, carteiras_adm, estoques_adm, extratos, planilha_anterior=No
     if not carteiras:
         raise ErroEntrada("Nenhuma carteira diária da ADM válida (.xlsx). Ela é indispensável: é dela que vêm a data-base, "
                           "os fundos de liquidez, as despesas e as cotas.")
-    adm = max(carteiras, key=lambda c: c["data_posicao"])
+    # carteira principal: a que tem os ativos (direitos creditórios, fundos, despesas ou conta corrente).
+    # As demais da mesma data, com posições só nas próprias cotas, são carteiras de classes (mezanino, sênior).
+    def principal(c):
+        return bool(c["direitos_creditorios"] or c["fundos"] or c["despesas"])
+    principais = [c for c in carteiras if principal(c)]
+    if not principais:
+        raise ErroEntrada("Nenhuma das carteiras enviadas é a carteira principal do fundo (a que tem os direitos "
+                          "creditórios e as despesas). Em fundos com várias classes, envie também a da subordinada.")
+    adm = max(principais, key=lambda c: c["data_posicao"])
     data_base = adm["data_posicao"]
+    classes = montar_classes(adm, [c for c in carteiras if not principal(c)], alertas)
 
     # ---------------------------------------------------------------- CNABs
     remessas, baixas = {}, []
@@ -342,6 +461,7 @@ def processar(cnabs, carteiras_adm, estoques_adm, extratos, planilha_anterior=No
         titulos=titulos, lotes=list(lotes.values()),
         estoque_adm=estoque_adm, estoque_adm_arquivo=est_arq, estoque_adm_data=est_data,
         caixa=caixa, despesas=despesas, fundos=adm["fundos"], quantidade_cotas=adm["quantidade_cotas"],
+        classes=classes,
         adm=adm, carteira_adm_arquivo=adm["arquivo"],
         sacados=sorted({t["sacado"] for t in titulos}),
         vencimentos=sorted({t["vencimento"] for t in titulos if t["vencimento"]}),
@@ -350,6 +470,8 @@ def processar(cnabs, carteiras_adm, estoques_adm, extratos, planilha_anterior=No
         feriados=feriados(min(anos) - 1, max(anos) + 1),
         alertas=alertas, avisos=avisos, memoria=mem["arquivo"],
     )
+    dados["tipos_despesa"] = TIPOS_DESPESA
+    atribuir_tipos(dados)
     dados["arquivo_sugerido"] = (f"Carteira_Espelho_{nome_pasta or nome_arquivo(nome_fundo)}_{data_base:%Y%m%d}.xlsx")
     return dados
 

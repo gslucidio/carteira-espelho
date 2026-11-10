@@ -67,7 +67,8 @@ with st.sidebar.expander("📂 Arquivos", expanded=True):
     up_cnab = st.file_uploader("1 · CNABs: remessas e baixas", type=["rem", "txt", "ret"], accept_multiple_files=True,
                                help="Todos os CNABs desde o início do fundo, de remessa e de baixa.")
     up_cart = st.file_uploader("2 · Carteira diária da ADM (.xlsx)", type=["xlsx"], accept_multiple_files=True,
-                               help="Composição de Carteira. Se enviar mais de uma, vale a mais recente.")
+                               help="Composição de Carteira. Em fundos com várias classes, envie a carteira principal "
+                                    "(subordinada) e a de cada mezanino/sênior, da mesma data. Vale a data mais recente.")
     up_est = st.file_uploader("3 · Estoque analítico da ADM (.csv)", type=["csv"], accept_multiple_files=True,
                               help="Estoque título a título, da mesma data da carteira.")
     up_ext = st.file_uploader("4 · Extrato da conta (.csv)", type=["csv"], accept_multiple_files=True,
@@ -77,7 +78,8 @@ with st.sidebar.expander("📂 Arquivos", expanded=True):
                               help="A planilha que você baixou no uso anterior. Dela vêm as suas correções: "
                                    "classificações do caixa, despesas ajustadas e dados de enquadramento.")
 
-menu = st.sidebar.radio("Navegação", ["🏠 Visão geral", "📦 Estoque", "💰 Caixa e despesas", "✅ Conferências", "📥 Exportar"])
+menu = st.sidebar.radio("Navegação", ["🏠 Visão geral", "📊 DRE", "🏦 Passivo e cotas", "📦 Estoque", "💰 Caixa e despesas",
+                                      "✅ Conferências", "📥 Exportar"])
 
 # =====================================================================================
 # sem arquivos indispensáveis: tela de boas-vindas
@@ -124,6 +126,7 @@ ep = st.session_state["ed_painel"]
 dados["inicio_classe"] = ep.get("inicio", dados["inicio_classe"])
 dados["minimo_dc"] = ep.get("minimo", dados["minimo_dc"])
 dados["prazo_enquadramento"] = ep.get("prazo", dados["prazo_enquadramento"])
+nucleo.atribuir_tipos(dados)
 r = calculos.calcular(dados)
 G, A, P = r["gestora"], r["adm"], r["painel"]
 a_classificar = sum(1 for m in dados["caixa"] if m["classificacao"] == "A classificar")
@@ -158,8 +161,12 @@ if menu == "🏠 Visão geral":
 
     m1, m2, m3, m4 = st.columns(4)
     dif_pl = G["pl"] - A["pl"]
-    m1.metric("PL pela gestora", brl(G["pl"]), f"{brl(dif_pl)} vs ADM" if abs(dif_pl) >= 1 else "igual à ADM",
+    rotulo_pl = "PL da subordinada (gestora)" if dados.get("classes") else "PL pela gestora"
+    m1.metric(rotulo_pl, brl(G["pl"]), f"{brl(dif_pl)} vs ADM" if abs(dif_pl) >= 1 else "igual à ADM",
               delta_color="off" if abs(dif_pl) < 1 else "normal")
+    if dados.get("classes"):
+        st.caption(f"Patrimônio total do fundo (todas as classes): {brl(G['pl_total'])} pela gestora · "
+                   f"{brl(A['pl_total'])} pela ADM")
     m2.metric("Valor da cota (gestora)", num(G["cota"], 6),
               f"{num(G['cota'] - A['cota'], 6)} vs ADM" if abs(dif_pl) >= 1 else "igual à ADM",
               delta_color="off" if abs(dif_pl) < 1 else "normal")
@@ -204,6 +211,120 @@ if menu == "🏠 Visão geral":
         st.subheader("Correções mantidas da planilha anterior")
         for a in dados["avisos"]:
             st.info(a)
+
+# =====================================================================================
+elif menu == "📊 DRE":
+    D = r["dre"]
+    st.subheader("Demonstração do resultado — acumulado desde o início")
+    st.caption(f"Regime de competência, até {data_br(dados['data_base'])}: receitas apropriadas e despesas pagas ou a pagar.")
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Receitas", brl(D["total_receitas"]))
+    m2.metric("Despesas", brl(-D["total_despesas"]))
+    m3.metric("Resultado", brl(D["resultado"]))
+
+    linhas = [("RECEITAS", None, True)] + [(f"   {l}", v, False) for l, v in D["receitas"].itertuples(index=False)] + \
+             [("Total de receitas", D["total_receitas"], True), ("DESPESAS", None, True)] + \
+             [(f"   {t}", -tot, False) for t, tot in zip(D["despesas"]["Tipo"], D["despesas"]["Total"])] + \
+             [("Total de despesas", -D["total_despesas"], True), ("RESULTADO DO PERÍODO", D["resultado"], True)]
+    tab = pd.DataFrame([(l, brl(v) if v is not None else "",
+                         pct(v / D["total_receitas"]) if v is not None and D["total_receitas"] else "") for l, v, _ in linhas],
+                       columns=["", "Valor", "% das receitas"])
+    negrito = [b for _, _, b in linhas]
+    st.dataframe(tab.style.apply(lambda row: ["font-weight: bold" if negrito[row.name] else "" for _ in row], axis=1),
+                 hide_index=True, width="stretch", height=(len(tab) + 1) * 35 + 3)
+    if abs(D["diferenca"]) < 0.05:
+        st.success(f"Confere com a carteira: o resultado do DRE é igual ao PL menos o capital líquido aportado "
+                   f"({brl(D['conferencia'])}).")
+    else:
+        st.error(f"O DRE difere do resultado pela carteira (PL − capital) em {brl(D['diferenca'])}. "
+                 "Verifique lançamentos de caixa classificados de forma incoerente.")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**Despesas por tipo: pagas e a pagar**")
+        tabela(D["despesas"], moeda=("Pagas", "A pagar", "Total"))
+    with c2:
+        dd = D["despesas"].melt(id_vars="Tipo", value_vars=["Pagas", "A pagar"], var_name="Situação", value_name="Valor")
+        if len(dd):
+            st.altair_chart(alt.Chart(dd).mark_bar().encode(
+                x=alt.X("Valor:Q", title=None), y=alt.Y("Tipo:N", sort="-x", title=None), color="Situação:N",
+                tooltip=["Tipo", "Situação", alt.Tooltip("Valor:Q", format=",.2f")]).properties(height=220), width="stretch")
+
+    st.subheader("Fluxo de caixa por mês")
+    st.caption("Regime de caixa: o que efetivamente entrou (+) e saiu (−) da conta corrente em cada mês.")
+    fl = r["fluxo_mensal"]
+    if len(fl):
+        fl_fmt = fl.copy()
+        fl_fmt.columns = [pd.Timestamp(c + "-01").strftime("%b/%y") for c in fl.columns]
+        st.dataframe(fl_fmt.style.format(brl).apply(
+            lambda row: ["font-weight: bold" if row.name == "Variação do caixa" else "" for _ in row], axis=1),
+            width="stretch")
+    st.caption("Despesas pagas por tipo dependem da classificação do caixa. Pagamentos à ID CTVM entram em "
+               "'Administração e custódia', porque o extrato não separa as duas taxas.")
+
+# =====================================================================================
+elif menu == "🏦 Passivo e cotas":
+    pv = r["passivo"]
+    if not len(pv):
+        st.info("Fundo de classe única. Se o fundo tiver mezanino ou sênior, envie também as carteiras dessas classes "
+                "(da mesma data) na categoria 2.")
+        st.markdown(f"**Cotas:** {num(G['cotas'], 8)} · **Cota pela gestora:** {num(G['cota'], 8)} · "
+                    f"**Cota ADM:** {num(A['cota_informada'] or 0, 8)}")
+    else:
+        st.subheader("Composição do passivo")
+        k = st.columns(len(pv))
+        for col, (_, row) in zip(k, pv.sort_values("ordem").iterrows()):
+            col.metric(row["classe"], brl(row["pl_gestora"]), f"{pct(row['pct_pl'])} do PL total", delta_color="off")
+        graf = pv.assign(rotulo=pv["classe"]).sort_values("ordem")
+        st.altair_chart(alt.Chart(graf).mark_bar().encode(
+            x=alt.X("sum(pl_gestora):Q", stack="normalize", axis=alt.Axis(format="%"), title="% do patrimônio total"),
+            color=alt.Color("rotulo:N", sort=list(graf["rotulo"]), title="Classe"),
+            order=alt.Order("ordem:Q"),
+            tooltip=["classe", alt.Tooltip("pl_gestora:Q", format=",.2f", title="PL"),
+                     alt.Tooltip("pct_pl:Q", format=".1%", title="% PL")]).properties(height=90), width="stretch")
+
+        st.subheader("Classes: valores, rentabilidade e benchmark")
+        tb = pv.sort_values("ordem")[["classe", "indice", "cotas", "cota_adm", "pl_adm", "aplicado", "rent_inicial",
+                                      "rent_mes", "cdi_mes", "benchmark_ok"]].copy()
+        tb["cotas"] = tb["cotas"].apply(lambda v: num(v, 4))
+        tb["cota_adm"] = tb["cota_adm"].apply(lambda v: num(v, 6) if v else "-")
+        tb["cdi_mes"] = tb["cdi_mes"].apply(lambda v: pct(v) if v is not None and not pd.isna(v) else "-")
+        tb["benchmark_ok"] = tb["benchmark_ok"].map({True: "✅ aderente", False: "❌ fora"}).fillna("-")
+        tabela(tb.rename(columns={"classe": "Classe", "indice": "Benchmark", "cotas": "Cotas", "cota_adm": "Cota",
+                                  "pl_adm": "PL", "aplicado": "Capital aplicado", "rent_inicial": "Rent. desde o início",
+                                  "rent_mes": "Rent. no mês", "cdi_mes": "% do CDI no mês", "benchmark_ok": "Benchmark (último dia)"}),
+               moeda=("PL", "Capital aplicado"), pcts=("Rent. desde o início", "Rent. no mês"))
+        st.caption("Benchmark: o CDI do último dia é deduzido da própria carteira da ADM (rentabilidade do dia ÷ % do CDI) "
+                   "e a rentabilidade esperada é CDI + spread do índice. 'Aderente' = diferença menor que 0,002 ponto percentual.")
+
+        st.subheader("Índices de subordinação")
+        sb = pv.sort_values("ordem", ascending=False)[["classe", "pl_gestora", "subordinacao_abaixo"]]
+        tabela(sb.rename(columns={"classe": "Classe", "pl_gestora": "PL",
+                                  "subordinacao_abaixo": "Classes abaixo dela (% do PL total)"}),
+               moeda=("PL",), pcts=("Classes abaixo dela (% do PL total)",))
+        st.caption("Ordem de prioridade assumida: subordinada por último; entre as mezaninos, a de maior spread é a mais "
+                   "júnior. Confirme com o regulamento e compare com os índices mínimos exigidos.")
+
+        st.subheader("Carteira principal × carteiras das classes")
+        cmp_ = pv.iloc[1:][["classe", "passivo_principal", "pl_adm", "dif_principal"]]
+        tabela(cmp_.rename(columns={"classe": "Classe", "passivo_principal": "Passivo na carteira principal",
+                                    "pl_adm": "PL na carteira da classe", "dif_principal": "Diferença"}),
+               moeda=("Passivo na carteira principal", "PL na carteira da classe", "Diferença"),
+               destaque=("Diferença", lambda v: abs(v) >= 1))
+        for cl in dados["classes"]:
+            if cl["divergencias"]:
+                st.error(f"{cl['nome']}: aplicações registradas de forma diferente nas duas carteiras")
+                dv = pd.DataFrame(cl["divergencias"])
+                dv["dif"] = dv["valor_principal"].fillna(0) - dv["valor_classe"].fillna(0)
+                dv["cotas_principal"] = dv["cotas_principal"].apply(lambda v: num(v, 6) if v is not None and not pd.isna(v) else "-")
+                dv["cotas_classe"] = dv["cotas_classe"].apply(lambda v: num(v, 6) if v is not None and not pd.isna(v) else "-")
+                tabela(dv.rename(columns={"data": "Aplicação", "valor_aplicado": "Valor aplicado",
+                                          "cotas_principal": "Cotas (principal)", "cotas_classe": "Cotas (classe)",
+                                          "valor_principal": "Valor (principal)", "valor_classe": "Valor (classe)",
+                                          "dif": "Diferença"}),
+                       moeda=("Valor aplicado", "Valor (principal)", "Valor (classe)", "Diferença"), datas=("Aplicação",))
+        st.caption("Na visão da gestora, o passivo de cada classe é o PL da carteira da própria classe. Uma diferença "
+                   "aqui muda o PL da subordinada.")
 
 # =====================================================================================
 elif menu == "📦 Estoque":

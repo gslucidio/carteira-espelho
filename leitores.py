@@ -243,6 +243,68 @@ def _valor(item, *nomes):
     return None
 
 
+def _pct_br(s):
+    """'(6,6362%)' -> -0.066362 ; '0,0886%' -> 0.000886 ; ' - ' -> None"""
+    if isinstance(s, (int, float)):
+        return float(s)
+    s = (s or "").strip()
+    if not s or s == "-":
+        return None
+    neg = s.startswith("(")
+    s = s.strip("()%").replace(".", "").replace(",", ".")
+    try:
+        v = float(s) / 100
+    except ValueError:
+        return None
+    return -v if neg else v
+
+
+def _posicoes_renda_fixa(ws):
+    """
+    Posições da tabela de Renda Fixa com colunas Id/Operação/... (cotas de classes do próprio fundo).
+    Lê pela ordem dos valores na linha, porque o cabeçalho e os dados ficam em colunas mescladas diferentes.
+    """
+    out, grupo, dentro = [], None, False
+    for row in ws.iter_rows():
+        v = [c.value for c in row if c.value is not None]
+        if not v:
+            continue
+        b = v[0]
+        if b == "Id":
+            dentro = True
+            continue
+        if not dentro:
+            continue
+        if isinstance(b, str) and b.strip().lower().startswith("total renda"):
+            dentro = False
+            continue
+        if isinstance(b, str):
+            grupo = b.strip()
+            continue
+        if isinstance(b, (int, float)) and len(v) >= 15 and isinstance(v[1], (dt.datetime, dt.date)):
+            out.append(dict(grupo=grupo, id=v[0], data=v[1].date() if isinstance(v[1], dt.datetime) else v[1],
+                            titulo=str(v[4]), quantidade=float(v[6]), taxa=v[8], indice=str(v[9]),
+                            valor_aplicado=float(v[10]), pu=float(v[11]), valor=float(v[14])))
+    return out
+
+
+def _rentabilidades(ws):
+    r, _ = _acha(ws, "Rentabilidades")
+    if r is None:
+        return {}
+    cab, out = None, {}
+    for rr in range(r + 1, min(r + 6, ws.max_row + 1)):
+        vals = [c.value for c in ws[rr] if c.value is not None]
+        if not vals:
+            continue
+        if "Dia" in vals:
+            cab = [str(x).strip() for x in vals]
+            continue
+        if cab and isinstance(vals[0], str) and vals[0].strip() in ("Carteira", "(%) CDI"):
+            out[vals[0].strip()] = dict(zip(cab, [_pct_br(x) for x in vals[1:]]))
+    return out
+
+
 def ler_carteira_adm(fonte):
     """Composição de Carteira (Fechamento) da administradora, em XLSX."""
     ws = load_workbook(io.BytesIO(conteudo(fonte)), data_only=True).active
@@ -289,16 +351,21 @@ def ler_carteira_adm(fonte):
         nums = _numeros_a_direita(ws, rr, cc_)
         return nums[0] if nums else None
 
-    nome_fundo = None
+    nome_fundo, codigo = None, None
     r, c = _acha(ws, "Carteira:")
     if r:
         for v in _linha(ws, r)[c:]:
             if isinstance(v, str) and v.strip():
-                nome_fundo = re.sub(r"^\d+\s*-\s*", "", v.strip())
+                m = re.match(r"^(\d+)\s*-\s*(.*)$", v.strip())
+                codigo, nome_fundo = (m.group(1), m.group(2)) if m else (None, v.strip())
                 break
     contas = [str(_valor(i, "Descri")).strip() for i in _secao(ws, "Saldos em Conta Corrente")]
 
+    posicoes = _posicoes_renda_fixa(ws)
     return dict(
+        codigo=codigo,
+        posicoes_classes=posicoes,
+        rentabilidades=_rentabilidades(ws),
         nome_fundo=nome_fundo,
         conta=contas[0] if contas else "",
         data_posicao=data_posicao,
