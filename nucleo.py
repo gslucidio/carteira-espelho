@@ -23,6 +23,7 @@ class ErroEntrada(Exception):
     """Falta um arquivo indispensável."""
 
 OCORRENCIA_ENTRADA = {"01"}
+ALIQUOTA_IOF = 0.0038   # IOF sobre aportes em FIDC
 
 # Regras fixas de classificação do caixa, válidas para todos os fundos.
 # (trecho do nome da contraparte, classificação se ENTRADA, classificação se SAÍDA, referência)
@@ -36,8 +37,23 @@ REGRAS_CAIXA = [
 ]
 
 
-TIPOS_DESPESA = ["Taxa de gestão", "Administração e custódia", "Plataforma e serviços", "Auditoria",
+TIPOS_DESPESA = ["Taxa de gestão", "Administração e custódia", "Tributos (IOF)", "Plataforma e serviços", "Auditoria",
                  "Tarifas bancárias", "Outras despesas"]
+
+# palavras genéricas, ignoradas ao reconhecer o nome de um FIDC investido no extrato
+GENERICAS = {"FIDC", "FIC", "FI", "NP", "RL", "FUNDO", "FUNDOS", "DE", "DO", "DA", "EM", "INVESTIMENTO", "INVESTIMENTOS",
+             "DIREITOS", "CREDITORIOS", "CREDITÓRIOS", "COTAS", "MULTISSETORIAL", "LP", "RF", "SENIOR", "SÊNIOR", "MEZ",
+             "MEZANINO", "SUB", "SUBORDINADA", "CLASSE", "RESPONSABILIDADE", "LIMITADA", "NAO", "NÃO", "PADRONIZADOS", "II", "III"}
+
+
+def tipo_fundo(descricao):
+    """Fundo da carteira: cotas de FIDC (ativo-alvo de um FIC) ou fundo de liquidez."""
+    t = (descricao or "").upper()
+    return "Cotas de FIDC" if re.search(r"(?<![A-Z])FIDC(?![A-Z])|DIREITOS CRED", t) else "Liquidez"
+
+
+def palavras_chave(descricao):
+    return {p for p in re.findall(r"[A-ZÀ-Ú0-9]{3,}", (descricao or "").upper()) if p not in GENERICAS}
 
 
 def tipo_despesa(texto, classificacao=None):
@@ -45,6 +61,8 @@ def tipo_despesa(texto, classificacao=None):
     t = (texto or "").upper()
     if classificacao == "Tarifa bancária" or "TARIFA" in t:
         return "Tarifas bancárias"
+    if re.search(r"(?<![A-Z])IOF(?![A-Z])", t):
+        return "Tributos (IOF)"
     if "GEST" in t or re.search(r"(?<![A-Z])VIZ(?![A-Z])", t):
         return "Taxa de gestão"
     if any(x in t for x in ("ADM", "CUST", "ID CORRETORA", "ID CTVM")):
@@ -128,16 +146,23 @@ def montar_classes(adm, carteiras_classes, alertas):
             restantes = list(pos_c)
             for p in pos_p:
                 par = next((q for q in restantes if q["data"] == p["data"] and abs(q["valor_aplicado"] + p["valor_aplicado"]) < 0.01), None)
+                if par is None:   # mesma data, valor aplicado diferente: compara assim mesmo
+                    mesmas = [q for q in restantes if q["data"] == p["data"]]
+                    par = min(mesmas, key=lambda q: abs(q["valor_aplicado"] + p["valor_aplicado"])) if mesmas else None
                 if par is None:
-                    cl["divergencias"].append(dict(data=p["data"], valor_aplicado=-p["valor_aplicado"], cotas_principal=-p["quantidade"],
+                    cl["divergencias"].append(dict(data=p["data"], valor_aplicado=None, valor_aplicado_principal=-p["valor_aplicado"],
+                                                   cotas_principal=-p["quantidade"],
                                                    cotas_classe=None, valor_principal=-p["valor"], valor_classe=None))
                     continue
                 restantes.remove(par)
-                if abs(par["quantidade"] + p["quantidade"]) > 1e-6 or abs(par["valor"] + p["valor"]) >= 0.01:
-                    cl["divergencias"].append(dict(data=p["data"], valor_aplicado=par["valor_aplicado"], cotas_principal=-p["quantidade"],
+                if (abs(par["quantidade"] + p["quantidade"]) > 1e-6 or abs(par["valor"] + p["valor"]) >= 0.01
+                        or abs(par["valor_aplicado"] + p["valor_aplicado"]) >= 0.01):
+                    cl["divergencias"].append(dict(data=p["data"], valor_aplicado=par["valor_aplicado"],
+                                                   valor_aplicado_principal=-p["valor_aplicado"], cotas_principal=-p["quantidade"],
                                                    cotas_classe=par["quantidade"], valor_principal=-p["valor"], valor_classe=par["valor"]))
             for q in restantes:
-                cl["divergencias"].append(dict(data=q["data"], valor_aplicado=q["valor_aplicado"], cotas_principal=None,
+                cl["divergencias"].append(dict(data=q["data"], valor_aplicado=q["valor_aplicado"], valor_aplicado_principal=None,
+                                               cotas_principal=None,
                                                cotas_classe=q["quantidade"], valor_principal=None, valor_classe=q["valor"]))
             if cl["divergencias"]:
                 alertas.append(f"Classe {nome}: {len(cl['divergencias'])} aplicação(ões) com quantidade de cotas ou valor diferente "
@@ -344,7 +369,8 @@ def processar(cnabs, carteiras_adm, estoques_adm, extratos, planilha_anterior=No
             valor_recebido=b["valor_pago"] if b else None, arquivo_remessa=r["arquivo"],
             arquivo_baixa=b["arquivo"] if b else None))
     if not titulos:
-        alertas.append("Nenhum título encontrado nos CNABs de remessa.")
+        if cnabs or adm["direitos_creditorios"]:
+            alertas.append("Nenhum título encontrado nos CNABs de remessa.")
     lotes = {}
     for t in titulos:
         lotes.setdefault(t["lote"], dict(nome=t["lote"], cedente=t["cedente"], data=t["data_aquisicao"], preco=0.0))
@@ -366,7 +392,8 @@ def processar(cnabs, carteiras_adm, estoques_adm, extratos, planilha_anterior=No
             alertas.append(f"O estoque analítico da ADM é de {est_data:%d/%m/%Y}, mas a carteira é de {data_base:%d/%m/%Y}.")
     else:
         est_data, est_arq, estoque_adm = None, "não encontrado", []
-        alertas.append("Nenhum estoque analítico da ADM até a data-base: conferência título a título vazia.")
+        if adm["direitos_creditorios"]:
+            alertas.append("Nenhum estoque analítico da ADM até a data-base: conferência título a título vazia.")
 
     # ---------------------------------------------------------------- extrato
     movs = {}
@@ -393,6 +420,19 @@ def processar(cnabs, carteiras_adm, estoques_adm, extratos, planilha_anterior=No
         nome = (m["contraparte"] or "").upper()
         return doc14(m) in nomes_cedentes or any(nome.startswith(n) or n.startswith(nome) for n in nomes_ced if nome)
 
+    for f_ in adm["fundos"]:
+        f_["tipo"] = tipo_fundo(f"{f_['descricao']} {f_.get('grupo') or ''}" if "DIREITOS" in (f_.get("grupo") or "").upper()
+                                else f_["descricao"])
+    chaves_fidc = {}
+    for f_ in adm["fundos"]:
+        if f_["tipo"] == "Cotas de FIDC":
+            for p in palavras_chave(f_["descricao"]):
+                chaves_fidc[p] = f_["descricao"]
+
+    def fidc_investido(m):
+        nome = (m["contraparte"] or "").upper()
+        return next((v for p, v in chaves_fidc.items() if re.search(r"(?<![A-Z0-9])" + re.escape(p) + r"(?![A-Z0-9])", nome)), None)
+
     a_classificar = 0
     for m in caixa:
         if m["contraparte"].startswith("CNPJ ") and doc14(m) in nomes_cedentes:
@@ -405,6 +445,9 @@ def processar(cnabs, carteiras_adm, estoques_adm, extratos, planilha_anterior=No
             cls = "Tarifa bancária"
         elif regra_fixa(m["contraparte"], m["entrada"]):
             cls, ref = regra_fixa(m["contraparte"], m["entrada"])
+        elif fidc_investido(m):
+            cls = "Resgate/amortização de cotas de FIDC" if m["entrada"] else "Aplicação em cotas de FIDC"
+            ref = fidc_investido(m)
         elif e_cedente(m):
             cls = "Recebimento de DC" if m["entrada"] else "Aquisição de DC"
         else:
@@ -423,6 +466,21 @@ def processar(cnabs, carteiras_adm, estoques_adm, extratos, planilha_anterior=No
             if v and abs(v[0] - m["entrada"]) < 0.01:
                 ref = f"Baixas de {m['data']:%d/%m} ({v[1]} títulos)"
         m["classificacao"], m["referencia"] = cls, ref
+    # IOF de 0,38% sobre aportes: pagamentos à administradora que batem com 0,38% de uma entrada recente
+    entradas = [m for m in caixa if m["entrada"] and m["classificacao"] not in
+                ("Resgate do fundo DI", "Recebimento de DC", "Resgate/amortização de cotas de FIDC")]
+    for m in caixa:
+        if not m["saida"] or m["classificacao"] not in ("Taxas e despesas", "A classificar"):
+            continue
+        if m["referencia"] and not m["referencia"].startswith(("Confirmar", "Taxa de administração (ID CTVM)", "Sugestão")):
+            continue
+        origem = next((e for e in entradas if 0 <= (m["data"] - e["data"]).days <= 31
+                       and abs(round(e["entrada"] * ALIQUOTA_IOF, 2) - m["saida"]) < 0.015), None)
+        if origem:
+            if m["classificacao"] == "A classificar":
+                a_classificar -= 1
+            m["classificacao"] = "Taxas e despesas"
+            m["referencia"] = f"IOF de 0,38% sobre o aporte de {brl(origem['entrada'])} em {origem['data']:%d/%m/%Y}"
     if a_classificar:
         alertas.append(f"{a_classificar} lançamento(s) de caixa 'A classificar' (em amarelo no Caixa). "
                        "Classifique-os; a escolha fica gravada na planilha e é mantida nas próximas vezes.")

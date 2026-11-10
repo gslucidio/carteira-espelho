@@ -49,9 +49,13 @@ def calcular(d):
 
     # ---------------------------------------------------------------- carteira gestora
     dc = float(ab["curva"].sum()) if len(ab) else 0.0
-    fundos = float(sum((f["quantidade"] or 0) * (f["valor_cota"] or 0) for f in d["fundos"]))
+    def valor_fundos(tipo):
+        return float(sum((f["quantidade"] or 0) * (f["valor_cota"] or 0) for f in d["fundos"]
+                         if f.get("tipo", "Liquidez") == tipo))
+    fundos = valor_fundos("Liquidez")
+    cotas_fidc = valor_fundos("Cotas de FIDC")
     desp_g = float(sum(x["valor_gestora"] for x in d["despesas"]))
-    pl_total = dc + fundos + conta - desp_g
+    pl_total = dc + cotas_fidc + fundos + conta - desp_g
     classes = d.get("classes") or []
     # passivo das classes pela gestora: o PL que cada classe tem na sua própria carteira
     passivo_g = float(sum((cl["pl"] if cl["pl"] is not None else cl["passivo_principal"]) for cl in classes))
@@ -60,29 +64,34 @@ def calcular(d):
     aportes = classe("Aporte de cotista", "entrada")
     resgates = classe("Resgate de cotista", "saida")
     capital = aportes - resgates
-    gestora = dict(dc=dc, fundos=fundos, conta=conta, despesas=desp_g, pl_total=pl_total, passivo_classes=passivo_g,
+    gestora = dict(dc=dc, cotas_fidc=cotas_fidc, fundos=fundos, conta=conta, despesas=desp_g, pl_total=pl_total, passivo_classes=passivo_g,
                    pl=pl, cotas=cotas,
                    cota=pl / cotas if cotas else 0.0, aportes=aportes, resgates=resgates, capital=capital,
                    resultado=pl_total - capital, resultado_pct=(pl_total - capital) / capital if capital else 0.0,
                    aplicado_di=classe("Aplicação no fundo DI", "saida") - classe("Resgate do fundo DI", "entrada"))
     gestora["rendimento_di"] = fundos - gestora["aplicado_di"]
+    gestora["aplicado_fidc"] = classe("Aplicação em cotas de FIDC", "saida") - classe("Resgate/amortização de cotas de FIDC", "entrada")
+    gestora["valorizacao_fidc"] = cotas_fidc - gestora["aplicado_fidc"]
 
     # ---------------------------------------------------------------- carteira ADM
     a = d["adm"]
     dcs = sorted(a["direitos_creditorios"], key=lambda x: -abs(x["valor_mercado"] or 0))
     adm = dict(dc=dcs[0]["valor_mercado"] if dcs else 0.0, dc_outros=sum(x["valor_mercado"] or 0 for x in dcs[1:]),
                dc_outros_nomes=", ".join(str(x["descricao"]) for x in dcs[1:]),
-               fundos=sum(f["valor"] or 0 for f in d["fundos"]), conta=a["conta_corrente"] or 0.0,
+               fundos=sum(f["valor"] or 0 for f in d["fundos"] if f.get("tipo", "Liquidez") == "Liquidez"),
+               cotas_fidc=sum(f["valor"] or 0 for f in d["fundos"] if f.get("tipo") == "Cotas de FIDC"),
+               conta=a["conta_corrente"] or 0.0,
                despesas=sum(x["valor"] for x in d["despesas"]), cotas=a["quantidade_cotas"] or 0,
                pl_informado=a["pl"], cota_informada=a["valor_cota"],
                passivo_classes=float(sum(cl["passivo_principal"] for cl in classes)))
-    adm["pl_total"] = adm["dc"] + adm["dc_outros"] + adm["fundos"] + adm["conta"] - adm["despesas"]
+    adm["pl_total"] = adm["dc"] + adm["dc_outros"] + adm["cotas_fidc"] + adm["fundos"] + adm["conta"] - adm["despesas"]
     adm["pl"] = adm["pl_total"] - adm["passivo_classes"]
     adm["cota"] = adm["pl"] / adm["cotas"] if adm["cotas"] else 0.0
 
     comparacao = pd.DataFrame([
         ("Direitos creditórios (curva)", gestora["dc"], adm["dc"], "Estoque"),
         ("Outros direitos creditórios na ADM", 0.0, adm["dc_outros"], adm["dc_outros_nomes"] or "-"),
+        ("Cotas de FIDC investidas", gestora["cotas_fidc"], adm["cotas_fidc"], "Carteira dos FIDCs investidos"),
         ("Fundos de liquidez", gestora["fundos"], adm["fundos"], "Extrato dos fundos"),
         ("Conta corrente", gestora["conta"], adm["conta"], "Caixa"),
         ("(−) Despesas a pagar", -gestora["despesas"], -adm["despesas"], "Despesas"),
@@ -158,7 +167,7 @@ def calcular(d):
     venc = (ab.groupby("vencimento").agg(face=("valor_face", "sum"), titulos=("chave", "count")).reset_index()
             if len(ab) else pd.DataFrame(columns=["vencimento", "face", "titulos"]))
     venc["dias"] = venc["vencimento"].apply(lambda v: (v - db).days) if len(venc) else []
-    dc_pl = dc / pl_total if pl_total else 0.0
+    dc_pl = (dc + cotas_fidc) / pl_total if pl_total else 0.0   # ativos-alvo: DC próprios + cotas de FIDC
     inicio = d.get("inicio_classe")
     limite = inicio + pd.Timedelta(days=int(d["prazo_enquadramento"])).to_pytimedelta() if inicio else None
     if dc_pl >= d["minimo_dc"]:
@@ -180,6 +189,9 @@ def calcular(d):
     receitas = [("Deságio realizado em títulos liquidados", realizado),
                 ("Deságio apropriado dos títulos em carteira", apropriado),
                 ("Rendimento dos fundos de liquidez", gestora["rendimento_di"])]
+    if abs(cotas_fidc) >= 0.01 or abs(gestora["aplicado_fidc"]) >= 0.01:
+        receitas.insert(0, ("Valorização das cotas de FIDC investidas", gestora["valorizacao_fidc"]))
+    receitas = [x for x in receitas if abs(x[1]) >= 0.005 or x[0].startswith("Rendimento")]
     if abs(outros_liq) >= 0.01:
         receitas.append(("Outros movimentos / não classificados (líquido)", outros_liq))
     pagas = defaultdict(float)
@@ -203,7 +215,8 @@ def calcular(d):
     # ---------------------------------------------------------------- fluxo de caixa mensal
     grupos = {"Aporte de cotista": "Aportes de cotistas", "Resgate de cotista": "Resgates e amortizações",
               "Aquisição de DC": "Aquisição de direitos creditórios", "Recebimento de DC": "Recebimento de direitos creditórios",
-              "Aplicação no fundo DI": "Fundos de liquidez (líquido)", "Resgate do fundo DI": "Fundos de liquidez (líquido)"}
+              "Aplicação no fundo DI": "Fundos de liquidez (líquido)", "Resgate do fundo DI": "Fundos de liquidez (líquido)",
+              "Aplicação em cotas de FIDC": "Cotas de FIDC (líquido)", "Resgate/amortização de cotas de FIDC": "Cotas de FIDC (líquido)"}
     if len(cx):
         f = cx[cx["data"] <= db].copy()
         f["Mês"] = f["data"].apply(lambda v: v.strftime("%Y-%m"))

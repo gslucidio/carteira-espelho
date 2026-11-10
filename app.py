@@ -174,7 +174,7 @@ if menu == "🏠 Visão geral":
         m3.metric("Resultado acumulado", brl(G["resultado"]), pct(G["resultado_pct"]) + " do capital aportado")
     else:
         m3.metric("Resultado acumulado", "-", "classifique os aportes de cotista no Caixa", delta_color="off")
-    m4.metric("Direitos creditórios / PL", pct(P["dc_pl"]), f"mínimo {pct(P['minimo'])} · {P['situacao']}",
+    m4.metric("Ativos-alvo / PL" if G["cotas_fidc"] else "Direitos creditórios / PL", pct(P["dc_pl"]), f"mínimo {pct(P['minimo'])} · {P['situacao']}",
               delta_color="off")
 
     st.subheader("Carteira: gestora × administradora")
@@ -185,8 +185,9 @@ if menu == "🏠 Visão geral":
     col_a, col_b = st.columns(2)
     with col_a:
         st.subheader("Composição do PL (gestora)")
-        comp = pd.DataFrame({"Item": ["Direitos creditórios", "Fundos de liquidez", "Conta corrente"],
-                             "Valor": [G["dc"], G["fundos"], max(G["conta"], 0)]})
+        comp = pd.DataFrame({"Item": ["Direitos creditórios", "Cotas de FIDC", "Fundos de liquidez", "Conta corrente"],
+                             "Valor": [G["dc"], G["cotas_fidc"], G["fundos"], max(G["conta"], 0)]})
+        comp = comp[comp["Valor"] > 0.005]
         st.altair_chart(alt.Chart(comp).mark_arc(innerRadius=60).encode(
             theta="Valor:Q", color=alt.Color("Item:N", legend=alt.Legend(orient="bottom")),
             tooltip=["Item", alt.Tooltip("Valor:Q", format=",.2f")]).properties(height=280), width="stretch")
@@ -315,20 +316,38 @@ elif menu == "🏦 Passivo e cotas":
             if cl["divergencias"]:
                 st.error(f"{cl['nome']}: aplicações registradas de forma diferente nas duas carteiras")
                 dv = pd.DataFrame(cl["divergencias"])
+                if "valor_aplicado_principal" not in dv:
+                    dv["valor_aplicado_principal"] = None
                 dv["dif"] = dv["valor_principal"].fillna(0) - dv["valor_classe"].fillna(0)
                 dv["cotas_principal"] = dv["cotas_principal"].apply(lambda v: num(v, 6) if v is not None and not pd.isna(v) else "-")
                 dv["cotas_classe"] = dv["cotas_classe"].apply(lambda v: num(v, 6) if v is not None and not pd.isna(v) else "-")
-                tabela(dv.rename(columns={"data": "Aplicação", "valor_aplicado": "Valor aplicado",
+                dv = dv[["data", "valor_aplicado_principal", "valor_aplicado", "cotas_principal", "cotas_classe",
+                         "valor_principal", "valor_classe", "dif"]]
+                tabela(dv.rename(columns={"data": "Aplicação", "valor_aplicado_principal": "Aplicado (principal)",
+                                          "valor_aplicado": "Aplicado (classe)",
                                           "cotas_principal": "Cotas (principal)", "cotas_classe": "Cotas (classe)",
                                           "valor_principal": "Valor (principal)", "valor_classe": "Valor (classe)",
                                           "dif": "Diferença"}),
-                       moeda=("Valor aplicado", "Valor (principal)", "Valor (classe)", "Diferença"), datas=("Aplicação",))
+                       moeda=("Aplicado (principal)", "Aplicado (classe)", "Valor (principal)", "Valor (classe)", "Diferença"),
+                       datas=("Aplicação",))
         st.caption("Na visão da gestora, o passivo de cada classe é o PL da carteira da própria classe. Uma diferença "
                    "aqui muda o PL da subordinada.")
 
 # =====================================================================================
 elif menu == "📦 Estoque":
     ab = r["em_carteira"]
+    investidos = [f for f in dados["fundos"] if f.get("tipo") == "Cotas de FIDC"]
+    if investidos:
+        st.subheader("Cotas de FIDC investidas")
+        fi = pd.DataFrame([dict(Fundo=f["descricao"], Cotas=num(f["quantidade"] or 0, 6), Cota=num(f["valor_cota"] or 0, 8),
+                                Valor=(f["quantidade"] or 0) * (f["valor_cota"] or 0)) for f in investidos])
+        fi["% do PL"] = fi["Valor"] / G["pl_total"] if G["pl_total"] else 0.0
+        tabela(fi, moeda=("Valor",), pcts=("% do PL",))
+        st.markdown(f"Aplicado líquido (extrato): **{brl(G['aplicado_fidc'])}** · valor atual: **{brl(G['cotas_fidc'])}** · "
+                    f"valorização: **{brl(G['valorizacao_fidc'])}**")
+        st.caption("Para ver os direitos creditórios por trás dessas cotas, gere a carteira espelho do FIDC investido.")
+        if not len(r["titulos"]):
+            st.stop()
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Face em carteira", brl(float(ab["valor_face"].sum()) if len(ab) else 0))
     m2.metric("Valor na curva", brl(G["dc"]))

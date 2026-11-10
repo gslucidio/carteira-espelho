@@ -24,6 +24,7 @@ F_INP = PatternFill("solid", fgColor="FFF2CC")
 F_TOT = PatternFill("solid", fgColor="D9E1F2")
 
 CLASSES_CAIXA = ["Aporte de cotista", "Resgate de cotista", "Aplicação no fundo DI", "Resgate do fundo DI",
+                 "Aplicação em cotas de FIDC", "Resgate/amortização de cotas de FIDC",
                  "Aquisição de DC", "Recebimento de DC", "Taxas e despesas", "Tarifa bancária",
                  "Outros", "A classificar"]
 
@@ -265,61 +266,76 @@ def montar(d, destino):
     w["C4"].font = CINZA
     wb.defined_names["DataBase"] = DefinedName("DataBase", attr_text="Carteira!$B$4")
     fundos = d["fundos"]
-    k = 2 if classes else 0                    # linhas extras para o passivo das classes
-    r_plc = 13 if classes else 11              # PL da classe principal (subordinada ou cota única)
-    r_cotas, r_cota = 13 + k, 14 + k
-    rf0 = 18 + k                               # tabela de fundos DI
+    # linhas fixas da aba Carteira (usadas pelas outras abas)
+    R_DC, R_FIDC, R_LIQ, R_CC, R_DESP, R_PLT = 7, 8, 9, 10, 11, 12
+    R_CLS, R_PLC = (13, 14) if classes else (None, 12)
+    r_cotas = R_PLC + 2
+    r_cota = r_cotas + 1
+    rt = r_cota + 2                             # título da tabela de fundos
+    rf0 = rt + 2
     rf1 = rf0 + max(len(fundos), 1) - 1
+    TIPO_F, VAL_F = f"$B${rf0}:$B${rf1}", f"$E${rf0}:$E${rf1}"
     cabecalho(w, 6, ["Linha", "Valor", "% do PL"])
     linhas = [("(+) Direitos creditórios (curva)", f"=SUM({EST('Q')})"),
-              ("(+) Fundos de liquidez", f"=SUM(D{rf0}:D{rf1})"),
+              ("(+) Cotas de FIDC investidas", f'=SUMIF({TIPO_F},"Cotas de FIDC",{VAL_F})'),
+              ("(+) Fundos de liquidez", f'=SUMIF({TIPO_F},"Liquidez",{VAL_F})'),
               ("(+) Conta corrente", f'=SUMIFS(Caixa!{CE},Caixa!{CB},"<="&DataBase)-SUMIFS(Caixa!{CF},Caixa!{CB},"<="&DataBase)'),
               ("(−) Despesas a pagar", f"=-Despesas!E{r_tot_desp}")]
-    for i, (rot, f) in enumerate(linhas, 7):
+    for i, (rot, f) in enumerate(linhas, R_DC):
         cel(w, i, 1, rot)
         cel(w, i, 2, f, MOEDA, VERDE)
-        cel(w, i, 3, f"=B{i}/$B$11", PCT)
+        cel(w, i, 3, f"=B{i}/$B${R_PLT}", PCT)
     rotulo_pl = "(=) Patrimônio total do fundo" if classes else "(=) Patrimônio líquido"
-    for col, v in ((1, rotulo_pl), (2, "=SUM(B7:B10)"), (3, "=B11/$B$11")):
-        c = cel(w, 11, col, v, MOEDA if col == 2 else PCT if col == 3 else None, NEG)
+    for col, v in ((1, rotulo_pl), (2, f"=SUM(B{R_DC}:B{R_DESP})"), (3, f"=B{R_PLT}/$B${R_PLT}")):
+        c = cel(w, R_PLT, col, v, MOEDA if col == 2 else PCT if col == 3 else None, NEG)
         c.fill = F_TOT
     if classes:
-        cel(w, 12, 1, "(−) Cotas das demais classes (aba Passivo)")
-        cel(w, 12, 2, "=-Passivo!E{}".format(5 + len(classes)), MOEDA, VERDE)
-        cel(w, 12, 3, "=B12/$B$11", PCT)
-        for col, v in ((1, "(=) PL da subordinada"), (2, "=B11+B12"), (3, "=B13/$B$11")):
-            c = cel(w, 13, col, v, MOEDA if col == 2 else PCT if col == 3 else None, NEG)
+        cel(w, R_CLS, 1, "(−) Cotas das demais classes (aba Passivo)")
+        cel(w, R_CLS, 2, "=-Passivo!E{}".format(5 + len(classes)), MOEDA, VERDE)
+        cel(w, R_CLS, 3, f"=B{R_CLS}/$B${R_PLT}", PCT)
+        for col, v in ((1, "(=) PL da subordinada"), (2, f"=B{R_PLT}+B{R_CLS}"), (3, f"=B{R_PLC}/$B${R_PLT}")):
+            c = cel(w, R_PLC, col, v, MOEDA if col == 2 else PCT if col == 3 else None, NEG)
             c.fill = F_TOT
     w.cell(r_cotas, 1, "Quantidade de cotas" + (" da subordinada" if classes else ""))
     cel(w, r_cotas, 2, d["quantidade_cotas"], COTA, AZUL, editavel=True, borda=False)
     w.cell(r_cota, 1, "Valor da cota" + (" da subordinada" if classes else ""))
-    cel(w, r_cota, 2, f"=B{r_plc}/B{r_cotas}", COTA, NEG, borda=False)
-    w.cell(16 + k, 1, "Fundos de liquidez (quantidade × cota)").font = NEG
-    cabecalho(w, 17 + k, ["Fundo", "Quantidade de cotas", "Valor da cota", "Valor"])
-    for i, f_ in enumerate(fundos or [dict(descricao="", quantidade=0, valor_cota=0)]):
+    cel(w, r_cota, 2, f"=B{R_PLC}/B{r_cotas}", COTA, NEG, borda=False)
+    w.cell(rt, 1, "Cotas de fundos (quantidade × cota)").font = NEG
+    cabecalho(w, rt + 1, ["Fundo", "Tipo", "Quantidade de cotas", "Valor da cota", "Valor"])
+    for i, f_ in enumerate(fundos or [dict(descricao="", tipo="Liquidez", quantidade=0, valor_cota=0)]):
         r = rf0 + i
         cel(w, r, 1, f_["descricao"], estilo=AZUL)
-        cel(w, r, 2, f_["quantidade"], COTA, AZUL, editavel=True)
-        cel(w, r, 3, f_["valor_cota"], COTA, AZUL, editavel=True)
-        cel(w, r, 4, f"=B{r}*C{r}", MOEDA)
+        cel(w, r, 2, f_.get("tipo", "Liquidez"), estilo=AZUL, editavel=True)
+        cel(w, r, 3, f_["quantidade"], COTA, AZUL, editavel=True)
+        cel(w, r, 4, f_["valor_cota"], COTA, AZUL, editavel=True)
+        cel(w, r, 5, f"=C{r}*D{r}", MOEDA)
+    dvt = DataValidation(type="list", formula1='"Cotas de FIDC,Liquidez"')
+    w.add_data_validation(dvt)
+    dvt.add(f"B{rf0}:B{rf1}")
     r = rf1 + 1
-    w.cell(r, 1, "Aplicado líquido pelo extrato (aplicações − resgates)")
+    w.cell(r, 1, "Aplicado líquido nos fundos de liquidez (extrato)")
     cel(w, r, 2, f'={CLS("Aplicação no fundo DI", "C")}-{CLS("Resgate do fundo DI", "B")}', MOEDA, VERDE, borda=False)
     r_rend = r + 1
-    w.cell(r + 1, 1, "Rendimento acumulado implícito nos fundos")
-    cel(w, r + 1, 2, f"=B8-B{r}", MOEDA, borda=False)
-    p = r + 3
+    w.cell(r_rend, 1, "Rendimento acumulado implícito nos fundos de liquidez")
+    cel(w, r_rend, 2, f"=B{R_LIQ}-B{r}", MOEDA, borda=False)
+    w.cell(r + 2, 1, "Aplicado líquido em cotas de FIDC (extrato)")
+    cel(w, r + 2, 2, f'={CLS("Aplicação em cotas de FIDC", "C")}-{CLS("Resgate/amortização de cotas de FIDC", "B")}',
+        MOEDA, VERDE, borda=False)
+    r_valfidc = r + 3
+    w.cell(r_valfidc, 1, "Valorização acumulada das cotas de FIDC")
+    cel(w, r_valfidc, 2, f"=B{R_FIDC}-B{r + 2}", MOEDA, borda=False)
+    p = r + 5
     w.cell(p, 1, "Passivo — cotistas").font = NEG
     itens = [("Aportes de cotistas (extrato)", f'={CLS("Aporte de cotista", "B")}', VERDE),
              ("Resgates e amortizações pagos (extrato)", f'={CLS("Resgate de cotista", "C")}', VERDE),
              ("Capital líquido investido pelos cotistas", f"=B{p + 1}-B{p + 2}", PRETO),
-             ("Resultado acumulado do fundo (PL − capital líquido)", f"=B11-B{p + 3}", NEG)]
+             ("Resultado acumulado do fundo (PL − capital líquido)", f"=B{R_PLT}-B{p + 3}", NEG)]
     for i, (rot, f, est) in enumerate(itens, p + 1):
         w.cell(i, 1, rot)
         cel(w, i, 2, f, MOEDA, est, borda=False)
     w.cell(p + 5, 1, "Resultado acumulado em % do capital")
     cel(w, p + 5, 2, f"=IF(B{p + 3}=0,0,B{p + 4}/B{p + 3})", PCT, borda=False)
-    larguras(w, [52, 20, 18, 16])
+    larguras(w, [52, 20, 18, 16, 16])
 
     r_resultado = p + 4
 
@@ -331,7 +347,8 @@ def montar(d, destino):
     CL, CJ2 = f"$L${c0}:$L${c1 + 500}", f"$J${c0}:$J${c1 + 500}"
     rr = 5
     cel(w, rr, 1, "RECEITAS", estilo=NEG)
-    rec = [("Deságio realizado em títulos liquidados", f"=SUM({EST('S')})"),
+    rec = [("Valorização das cotas de FIDC investidas", f"=Carteira!B{r_valfidc}"),
+           ("Deságio realizado em títulos liquidados", f"=SUM({EST('S')})"),
            ("Deságio apropriado dos títulos em carteira", f'=SUMIFS({EST("Q")},{EST("N")},"Sim")-SUMIFS({EST("J")},{EST("N")},"Sim")'),
            ("Rendimento dos fundos de liquidez", f"=Carteira!B{r_rend}"),
            ("Outros movimentos / não classificados (líquido)",
@@ -393,7 +410,7 @@ def montar(d, destino):
                     cel(w, i, 7, f"=F{i}-E{i}", MOEDA)
                 else:
                     cel(w, i, j, v, fm, AZUL)
-            cel(w, i, 12, f"=E{i}/Carteira!$B$11", PCT)
+            cel(w, i, 12, f"=E{i}/Carteira!$B${R_PLT}", PCT)
         tp = 5 + len(classes)
         for col, v in ((1, "Total das demais classes"), (5, f"=SUM(E5:E{tp - 1})"), (6, f"=SUM(F5:F{tp - 1})"),
                        (7, f"=SUM(G5:G{tp - 1})"), (8, f"=SUM(H5:H{tp - 1})"), (12, f"=SUM(L5:L{tp - 1})")):
@@ -406,11 +423,11 @@ def montar(d, destino):
         cel(w, rs, 2, "residual")
         cel(w, rs, 3, f"=Carteira!B{r_cotas}", "#,##0.0000")
         cel(w, rs, 4, f"=Carteira!B{r_cota}", "#,##0.000000")
-        cel(w, rs, 5, "=Carteira!B13", MOEDA)
+        cel(w, rs, 5, f"=Carteira!B{R_PLC}", MOEDA)
         cel(w, rs, 9, rp.get("Carteira", {}).get("Inicial"), "0.00%", AZUL)
         cel(w, rs, 10, rp.get("Carteira", {}).get("Mês"), "0.00%", AZUL)
         cel(w, rs, 11, rp.get("(%) CDI", {}).get("Mês"), "0.0%", AZUL)
-        cel(w, rs, 12, f"=E{rs}/Carteira!$B$11", PCT)
+        cel(w, rs, 12, f"=E{rs}/Carteira!$B${R_PLT}", PCT)
         w.cell(rs + 2, 1, "Subordinação: % do patrimônio total que fica abaixo de cada classe").font = NEG
         cel(w, rs + 3, 1, "Subordinada / patrimônio total")
         cel(w, rs + 3, 2, f"=L{rs}", PCT)
@@ -420,14 +437,14 @@ def montar(d, destino):
         divs = [(cl["nome"], x) for cl in classes for x in cl["divergencias"]]
         if divs:
             w.cell(rdv, 1, "Aplicações registradas de forma diferente nas duas carteiras").font = fonte(bold=True, color="C00000")
-            cabecalho(w, rdv + 1, ["Classe", "Aplicação", "Valor aplicado", "Cotas (principal)", "Cotas (classe)",
-                                   "Valor (principal)", "Valor (classe)", "Diferença"])
+            cabecalho(w, rdv + 1, ["Classe", "Aplicação", "Aplicado (principal)", "Aplicado (classe)", "Cotas (principal)",
+                                   "Cotas (classe)", "Valor (principal)", "Valor (classe)", "Diferença"])
             for i, (nome, x) in enumerate(divs, rdv + 2):
-                for j, (v, fm) in enumerate(zip([nome, x["data"], x["valor_aplicado"], x["cotas_principal"], x["cotas_classe"],
-                                                 x["valor_principal"], x["valor_classe"]],
-                                                [None, DATA, MOEDA, "#,##0.000000", "#,##0.000000", MOEDA, MOEDA]), 1):
+                for j, (v, fm) in enumerate(zip([nome, x["data"], x.get("valor_aplicado_principal"), x["valor_aplicado"],
+                                                 x["cotas_principal"], x["cotas_classe"], x["valor_principal"], x["valor_classe"]],
+                                                [None, DATA, MOEDA, MOEDA, "#,##0.000000", "#,##0.000000", MOEDA, MOEDA]), 1):
                     cel(w, i, j, v, fm, AZUL)
-                cel(w, i, 8, f"=F{i}-G{i}", MOEDA)
+                cel(w, i, 9, f"=G{i}-H{i}", MOEDA)
         larguras(w, [34, 12, 14, 14, 18, 20, 13, 16, 12, 12, 12, 12])
 
     # ---------------------------------------------------------------- Carteira x ADM
@@ -445,31 +462,35 @@ def montar(d, destino):
     dc_principal = dcs[0]["valor_mercado"] if dcs else 0
     dc_outros = sum(x["valor_mercado"] or 0 for x in dcs[1:])
     outros_nomes = ", ".join(str(x["descricao"]) for x in dcs[1:]) or "-"
-    X = [("(+) Direitos creditórios (curva)", "=Carteira!B7", dc_principal, "Aba Estoque x ADM"),
+    val_tipo = lambda t: sum(f_["valor"] or 0 for f_ in fundos if f_.get("tipo", "Liquidez") == t)  # noqa: E731
+    X = [("(+) Direitos creditórios (curva)", f"=Carteira!B{R_DC}", dc_principal, "Aba Estoque x ADM"),
          ("(+) Outros direitos creditórios na ADM", 0, dc_outros, f"Linhas da ADM: {outros_nomes}"),
-         ("(+) Fundos de liquidez", "=Carteira!B8", sum(f_["valor"] or 0 for f_ in fundos), "Extrato dos fundos"),
-         ("(+) Conta corrente", "=Carteira!B9", adm["conta_corrente"], "Aba Caixa"),
-         ("(−) Despesas a pagar", "=Carteira!B10", f"=-Despesas!D{r_tot_desp}", "Aba Despesas")]
-    for i, (rot, g, a, onde) in enumerate(X, 7):
+         ("(+) Cotas de FIDC investidas", f"=Carteira!B{R_FIDC}", val_tipo("Cotas de FIDC"), "Carteira dos FIDCs investidos"),
+         ("(+) Fundos de liquidez", f"=Carteira!B{R_LIQ}", val_tipo("Liquidez"), "Extrato dos fundos"),
+         ("(+) Conta corrente", f"=Carteira!B{R_CC}", adm["conta_corrente"], "Aba Caixa"),
+         ("(−) Despesas a pagar", f"=Carteira!B{R_DESP}", f"=-Despesas!D{r_tot_desp}", "Aba Despesas")]
+    X_DC, X_CC = 7, 11
+    for i, (rot, g, a_, onde) in enumerate(X, 7):
         cel(w, i, 1, rot)
         cel(w, i, 2, g, MOEDA, VERDE if str(g).startswith("=") else AZUL)
-        cel(w, i, 3, a, MOEDA, VERDE if str(a).startswith("=") else AZUL, editavel=not str(a).startswith("="))
+        cel(w, i, 3, a_, MOEDA, VERDE if str(a_).startswith("=") else AZUL, editavel=not str(a_).startswith("="))
         cel(w, i, 4, f"=B{i}-C{i}", MOEDA)
         cel(w, i, 5, onde, estilo=fonte(color="595959"))
-    for col, v in enumerate([rotulo_pl, "=SUM(B7:B11)", "=SUM(C7:C11)", "=SUM(D7:D11)", ""], 1):
-        c = cel(w, 12, col, v, MOEDA if col in (2, 3, 4) else None, NEG)
+    xt = 7 + len(X)
+    for col, v in enumerate([rotulo_pl, f"=SUM(B7:B{xt - 1})", f"=SUM(C7:C{xt - 1})", f"=SUM(D7:D{xt - 1})", ""], 1):
+        c = cel(w, xt, col, v, MOEDA if col in (2, 3, 4) else None, NEG)
         c.fill = F_TOT
-    xp = 12                                     # linha do PL da classe principal nesta aba
+    xp = xt
     if classes:
-        cel(w, 13, 1, "(−) Cotas das demais classes")
-        cel(w, 13, 2, "=Carteira!B12", MOEDA, VERDE)
-        cel(w, 13, 3, -sum(cl["passivo_principal"] for cl in classes), MOEDA, AZUL, editavel=True)
-        cel(w, 13, 4, "=B13-C13", MOEDA)
-        cel(w, 13, 5, "Aba Passivo (gestora = PL de cada classe na sua carteira)", estilo=fonte(color="595959"))
-        for col, v in enumerate(["(=) PL da subordinada", "=B12+B13", "=C12+C13", "=B14-C14", ""], 1):
-            c = cel(w, 14, col, v, MOEDA if col in (2, 3, 4) else None, NEG)
+        cel(w, xt + 1, 1, "(−) Cotas das demais classes")
+        cel(w, xt + 1, 2, f"=Carteira!B{R_CLS}", MOEDA, VERDE)
+        cel(w, xt + 1, 3, -sum(cl["passivo_principal"] for cl in classes), MOEDA, AZUL, editavel=True)
+        cel(w, xt + 1, 4, f"=B{xt + 1}-C{xt + 1}", MOEDA)
+        cel(w, xt + 1, 5, "Aba Passivo (gestora = PL de cada classe na sua carteira)", estilo=fonte(color="595959"))
+        xp = xt + 2
+        for col, v in enumerate(["(=) PL da subordinada", f"=B{xt}+B{xt + 1}", f"=C{xt}+C{xt + 1}", f"=B{xp}-C{xp}", ""], 1):
+            c = cel(w, xp, col, v, MOEDA if col in (2, 3, 4) else None, NEG)
             c.fill = F_TOT
-        xp = 14
     xc = xp + 2
     cel(w, xc, 1, "Quantidade de cotas" + (" da subordinada" if classes else ""))
     cel(w, xc, 2, f"=Carteira!B{r_cotas}", COTA)
@@ -517,7 +538,7 @@ def montar(d, destino):
               f"=SUM('Estoque x ADM'!G{a0}:G{a1})", MOEDA, 0.01),
              ("Valor na curva × estoque analítico ADM (na data do estoque)", f"=SUM('Estoque x ADM'!M{a0}:M{a1})",
               f"=SUM('Estoque x ADM'!H{a0}:H{a1})", MOEDA, 1),
-             ("Valor na curva × carteira ADM", "=Carteira!B7", f"='Carteira x ADM'!C7", MOEDA, 1),
+             ("Valor na curva × carteira ADM", f"=Carteira!B{R_DC}", f"='Carteira x ADM'!C{X_DC}", MOEDA, 1),
              ("Quantidade de títulos em carteira", f'=COUNTIF({EST("N")},"Sim")', f"=COUNTA('Estoque x ADM'!A{a0}:A{a1})", "0", 0.5),
              ("Títulos divergentes (gestora / ADM)", f'=COUNTIF({EST("T")},"FALTA NA ADM")', f"='Estoque x ADM'!C{r_prob_ea}", "0", None)]
     for i, (rot, g, a, fmt, tol) in enumerate(itens, r + 2):
@@ -539,7 +560,7 @@ def montar(d, destino):
     itens = [("Pago na compra de direitos creditórios", f'=SUMIFS({EST("J")},{EST("G")},"<="&DataBase)', f'={CLS("Aquisição de DC", "C")}'),
              ("Recebido na liquidação de títulos", f'=SUMIFS({EST("M")},{EST("L")},"<="&DataBase)', f'={CLS("Recebimento de DC", "B")}'),
              ("Saldo da conta corrente (calculado × banco)", f"=Caixa!G{c1}", f"=Caixa!H{c1}"),
-             ("Saldo da conta corrente (gestora × carteira ADM)", "=Carteira!B9", "='Carteira x ADM'!C10")]
+             ("Saldo da conta corrente (gestora × carteira ADM)", f"=Carteira!B{R_CC}", f"='Carteira x ADM'!C{X_CC}")]
     for i, (rot, g, a) in enumerate(itens, r + 2):
         cel(w, i, 1, rot)
         cel(w, i, 2, g, MOEDA)
@@ -574,7 +595,7 @@ def montar(d, destino):
         cel(w, i, 1, s, estilo=AZUL)
         cel(w, i, 2, f'=SUMIFS({EST("I")},{EST("E")},A{i},{EST("N")},"Sim")', MOEDA)
         cel(w, i, 3, f"=IF($B${tot}=0,0,B{i}/$B${tot})", PCT)
-        cel(w, i, 4, f"=B{i}/Carteira!$B$11", PCT)
+        cel(w, i, 4, f"=B{i}/Carteira!$B${R_PLT}", PCT)
     for col, v, fmt in ((1, "TOTAL", None), (2, f"=SUM(B6:B{tot - 1})", MOEDA), (3, f"=SUM(C6:C{tot - 1})", PCT),
                         (4, f"=SUM(D6:D{tot - 1})", PCT)):
         c = cel(w, tot, col, v, fmt, NEG)
@@ -599,8 +620,8 @@ def montar(d, destino):
     w.cell(r, 1, "Enquadramento").font = NEG
     cabecalho(w, r + 1, ["Item", "Valor"])
     e = r + 2
-    cel(w, e, 1, "Direitos creditórios / PL")
-    cel(w, e, 2, "=Carteira!B7/Carteira!B11", PCT)
+    cel(w, e, 1, "Ativos-alvo (DC + cotas de FIDC) / PL")
+    cel(w, e, 2, f"=(Carteira!B{R_DC}+Carteira!B{R_FIDC})/Carteira!B{R_PLT}", PCT)
     cel(w, e + 1, 1, "Mínimo exigido pelo regulamento")
     cel(w, e + 1, 2, d["minimo_dc"], PCT, AZUL, editavel=True)
     cel(w, e + 2, 1, "Data de início das atividades da Classe")

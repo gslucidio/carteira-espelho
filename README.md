@@ -59,6 +59,17 @@ rentabilidade contra o benchmark (CDI + spread, verificado com o CDI implícito 
 índices de subordinação e divergências aplicação a aplicação entre as duas visões.
 A ordem de prioridade é assumida pelo spread (maior spread = mais júnior); confirme com o regulamento.
 
+## FICs (fundos que aplicam em cotas de outros FIDCs)
+
+Sem CNABs nem estoque: envie só a carteira (principal e das classes, se houver) e o extrato.
+Cotas de fundos com "FIDC" ou "Direitos Creditórios" no nome entram como **cotas de FIDC investidas**
+(ativo-alvo), separadas dos fundos de liquidez; o tipo pode ser trocado na tabela de fundos da aba Carteira.
+Transferências para esses FIDCs são classificadas como aplicação ou resgate de cotas de FIDC, e o DRE
+mostra a valorização das cotas investidas.
+
+Pagamentos à administradora iguais a 0,38% de um aporte recebido até 31 dias antes são classificados
+como IOF sobre o aporte.
+
 ## Limitações
 
 - Layouts da ID CTVM. Outra administradora exige ajustar `leitores.py`.

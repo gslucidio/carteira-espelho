@@ -305,6 +305,39 @@ def _rentabilidades(ws):
     return out
 
 
+def _fundos(ws):
+    """
+    Cotas de fundos (seção 'Cotas de Investimento'). Lê todos os grupos até 'Total Cotas de Investimento',
+    porque um FIC pode ter um grupo de cotas de FIDC e outro de fundos de liquidez, cada um com seu subtotal.
+    """
+    r, _ = _acha(ws, "Cotas de Investimento", coluna=2)
+    if r is None:
+        return []
+    out, cab, grupo = [], None, None
+    for rr in range(r + 1, ws.max_row + 1):
+        b = ws.cell(rr, 2).value
+        textos = [c.value.strip().lower() for c in ws[rr] if isinstance(c.value, str)]
+        if any(t.startswith("total cotas de investimento") for t in textos):
+            break
+        if isinstance(b, str) and b.strip().lower().startswith("descri"):
+            cab = {c.value.strip(): c.column for c in ws[rr] if isinstance(c.value, str) and c.value.strip()}
+            continue
+        if any(t.startswith("total") for t in textos):
+            continue
+        if not isinstance(b, str) or not b.strip():
+            continue
+        if cab is None:
+            grupo = b.strip()
+            continue
+        item = {nome: ws.cell(rr, col).value for nome, col in cab.items()}
+        if not any(isinstance(v, (int, float)) for v in item.values()):
+            grupo = b.strip()          # título de um novo grupo
+            continue
+        out.append(dict(descricao=str(_valor(item, "Descri")).strip(), grupo=grupo, quantidade=_valor(item, "Qtd. Cotas"),
+                        valor_cota=_valor(item, "Valor Cota"), valor=_valor(item, "Valor Líquido", "Valor Bruto")))
+    return out
+
+
 def ler_carteira_adm(fonte):
     """Composição de Carteira (Fechamento) da administradora, em XLSX."""
     ws = load_workbook(io.BytesIO(conteudo(fonte)), data_only=True).active
@@ -321,13 +354,7 @@ def ler_carteira_adm(fonte):
                 data_posicao = _data_br(v)
                 break
 
-    fundos = [dict(descricao=_valor(i, "Descri"), quantidade=_valor(i, "Qtd. Cotas"),
-                   valor_cota=_valor(i, "Valor Cota"), valor=_valor(i, "Valor Líquido", "Valor Bruto"))
-              for i in _secao(ws, "Cotas de Investimento") or _secao(ws, "Renda Fixa")]
-    if not fundos:
-        fundos = [dict(descricao=_valor(i, "Descri"), quantidade=_valor(i, "Qtd. Cotas"),
-                       valor_cota=_valor(i, "Valor Cota"), valor=_valor(i, "Valor Líquido", "Valor Bruto"))
-                  for i in _secao(ws, "Renda Fixa")]
+    fundos = _fundos(ws)
     dcs = [dict(descricao=_valor(i, "Descri"), codigo=_valor(i, "Código"), quantidade=_valor(i, "Qtde"),
                 valor_custo=_valor(i, "Valor Custo"), valor_mercado=_valor(i, "Valor Mercado"))
            for i in _secao(ws, "Direito Creditório")]
